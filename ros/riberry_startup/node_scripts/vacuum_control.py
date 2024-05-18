@@ -17,6 +17,7 @@ class VacuumControl(object):
         self.vacuum = False
         rospy.Subscriber('vacuum_on', Empty, self.on_cb)
         rospy.Subscriber('vacuum_off', Empty, self.off_cb)
+        rospy.Subscriber('vacuum_toggle', Empty, self.toggle_cb)
         # Calibate pressure
         self.pressure_samples = []
         self.atm_pressure = None
@@ -34,6 +35,15 @@ class VacuumControl(object):
         rospy.logwarn('Stop vacuuming')
         self.vacuum = False
         self.pub_off.publish(Empty())
+
+    def toggle_cb(self, msg):
+        rospy.logwarn('Toggle vacuum state')
+        if self.vacuum is False:
+            self.vacuum = True
+            self.pub_on.publish(Empty())
+        elif self.vacuum is True:
+            self.vacuum = False
+            self.pub_off.publish(Empty())
 
     def pressure_cb(self, msg):
         vacuum_pressure = msg.data
@@ -61,5 +71,5 @@ class VacuumControl(object):
 
 if __name__ == '__main__':
     rospy.init_node('vacuum_control')
-    vc = VacuumControl()
+    vc = VacuumControl(vacuum_threshold=130)
     rospy.spin()

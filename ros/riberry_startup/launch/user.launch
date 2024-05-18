@@ -2,7 +2,28 @@
 
   <arg name="namespace" default="robot_a" />
 
+  <include file="$(find riberry_startup)/launch/pump.launch" />
+
   <group ns="$(arg namespace)" >
   </group>
 
+  <node name="pump_button"
+        pkg="riberry_startup" type="button_state_republisher.py"
+        output="screen"
+        respawn="true">
+  </node>
+
+  <include file="$(find kxr_controller)/launch/kxr_controller.launch">
+    <arg name="urdf_path" value="$(find yamaguchi_7axis_arm_short)/urdf/yamaguchi_7axis_arm_short.urdf" />
+    <arg name="servo_config_path" value="$(find yamaguchi_7axis_arm_short)/config/servo_config.yaml" />
+  </include>
+
+  <include file="$(find kxreus)/launch/eusmodel_server.launch" />
+
+  <node name="grasp_can"
+        pkg="riberry_startup" type="grasp-can.l"
+        output="screen"
+        respawn="true">
+  </node>
+  
 </launch>
