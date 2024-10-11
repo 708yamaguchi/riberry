@@ -1,6 +1,7 @@
 #include <atom_s3_i2c.h>
 
 AtomS3I2C* AtomS3I2C::instance = nullptr;
+String AtomS3I2C::requestStr = ""; // Initialize the static requestStr
 
 AtomS3I2C::AtomS3I2C(AtomS3LCD &lcd, AtomS3Button &button)
   : atoms3lcd(lcd), atoms3button(button){
@@ -65,8 +66,24 @@ void AtomS3I2C::receiveEvent(int howMany) {
 void AtomS3I2C::requestEvent() {
   if (instance == nullptr)
       return;
-  WireSlave.write(instance->atoms3button.getButtonState());
+  uint8_t sentStr[100];
+  sentStr[0] = (uint8_t)instance->atoms3button.getButtonState();
+  const char* modeData = requestStr.c_str();
+ // sentStr[1]以降にstrDataをコピー (長さを確認)
+  size_t strLen = strlen(modeData);  // requestStrの長さを取得
+  if (strLen > 98) {
+      strLen = 98;  // バッファオーバーフローを防ぐため最大98バイトに制限
+  }
+  memcpy(&sentStr[1], modeData, strLen);  // sentStr[1]以降にstrDataをコピー
+
+  // WireSlave.print(requestStr);
+  WireSlave.write(sentStr, strLen+1);
+
   instance->atoms3button.notChangedButtonState();
+}
+
+void AtomS3I2C::setRequestStr(const String &str) {
+  requestStr = str;
 }
 
 void AtomS3I2C::task(void *parameter) {

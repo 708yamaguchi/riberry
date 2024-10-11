@@ -33,6 +33,8 @@ public:
    */
   bool checkTimeout();
 
+  static void setRequestStr(const String &str);
+
 #ifdef I2C_ADDR
   static constexpr int i2c_slave_addr = I2C_ADDR; /**< I2C slave address for communication. */
 #else
@@ -53,6 +55,8 @@ private:
   AtomS3Button &atoms3button; /**< Reference to the AtomS3Button object for button interactions. */
   unsigned long lastReceiveTime = 0; /**< Last time data was received over I2C. */
   const unsigned long receiveTimeout = 15000; /**< Timeout duration for I2C communication (15 seconds). */
+
+  static String requestStr; /**< String to be sent on I2C request. */
 
   /**
    * @brief Updates the last receive time to the current time.
