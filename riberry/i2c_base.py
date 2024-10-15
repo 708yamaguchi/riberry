@@ -1,5 +1,43 @@
-from filelock import FileLock, Timeout
+import io
+import fcntl
+import sys
+
+from filelock import FileLock
+from filelock import Timeout
 from i2c_for_esp32 import WirePacker
+
+
+if sys.hexversion < 0x03000000:
+    def _b(x):
+        return x
+else:
+    def _b(x):
+        return x.encode('latin-1')
+
+
+class i2c:
+
+    def __init__(self, device=0x42, bus=5):
+        self.fr = io.open("/dev/i2c-"+str(bus), "rb", buffering=0)
+        self.fw = io.open("/dev/i2c-"+str(bus), "wb", buffering=0)
+        # set device address
+        I2C_SLAVE = 0x0703
+        fcntl.ioctl(self.fr, I2C_SLAVE, device)
+        fcntl.ioctl(self.fw, I2C_SLAVE, device)
+
+    def write(self, data):
+        if type(data) is list:
+            data = bytearray(data)
+        elif type(data) is str:
+            data = _b(data)
+        self.fw.write(data)
+
+    def read(self, count):
+        return self.fr.read(count)
+
+    def close(self):
+        self.fw.close()
+        self.fr.close()
 
 
 class I2CBase:
