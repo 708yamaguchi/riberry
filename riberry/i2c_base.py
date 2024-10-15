@@ -1,11 +1,10 @@
-import io
 import fcntl
+import io
 import sys
 
-from filelock import FileLock
-from filelock import Timeout
-from i2c_for_esp32 import WirePacker
+from filelock import FileLock, Timeout
 
+from i2c_for_esp32 import WirePacker
 
 if sys.hexversion < 0x03000000:
     def _b(x):
