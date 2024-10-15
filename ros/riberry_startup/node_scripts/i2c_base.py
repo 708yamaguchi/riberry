@@ -1,6 +1,8 @@
 from filelock import FileLock, Timeout
 from i2c_for_esp32 import WirePacker
 
+
+# TODO: Use this class for bin/display_information.py
 class I2CBase:
     def __init__(self, i2c_addr, lock_path='/tmp/i2c-1.lock'):
         self.i2c_addr = i2c_addr
