@@ -14,6 +14,7 @@ private:
   static TeachingMode* instance; /**< Singleton instance of TeachingMode. */
   AtomS3LCD &atoms3lcd;
   AtomS3I2C &atoms3i2c;
+  static String prevColorStr;
 
   static void task(void *parameter);
   void drawARMarker(int marker_id, int x, int y, int size);

@@ -1,6 +1,8 @@
 #include <teaching_mode.h>
+#include <robot_2d.h>
 
 TeachingMode* TeachingMode::instance = nullptr;
+String TeachingMode::prevColorStr = ""; // Initialize the static prevColorStr
 
 TeachingMode::TeachingMode(AtomS3LCD &lcd, AtomS3I2C &i2c)
   : atoms3lcd(lcd), atoms3i2c(i2c), Mode("TeachingMode") {
@@ -19,10 +21,21 @@ void TeachingMode::task(void *parameter) {
     }
     // Display information
     else {
-      instance->atoms3lcd.drawBlack();
-      if (instance->atoms3lcd.color_str.isEmpty())
+      if (instance->atoms3lcd.color_str.isEmpty()) {
+        instance->atoms3lcd.drawBlack();
         instance->atoms3lcd.printColorText("Waiting for " + instance->getModeName());
+        vTaskDelay(pdMS_TO_TICKS(500));
+      }
       else {
+        // Do nothing if atoms3lcd.color_str is not changed
+        if (instance->prevColorStr.equals(instance->atoms3lcd.color_str)) {
+          vTaskDelay(pdMS_TO_TICKS(50));
+          continue;
+        }
+        else {
+          instance->prevColorStr = instance->atoms3lcd.color_str;
+          instance->atoms3lcd.drawBlack();
+        }
         int listSize = 5;
         // Draw string
         char** StrList = (char**)malloc(listSize * sizeof(char*));
@@ -39,10 +52,20 @@ void TeachingMode::task(void *parameter) {
         // Draw pose correction if specified
         if (!String(StrList[2]).equals(String("")) &&
             !String(StrList[3]).equals(String("")) &&
-            !String(StrList[4]).equals(String("")))
-          instance->drawARMarker(); // TODO
+            !String(StrList[4]).equals(String(""))) {
+          Robot2D robot_2d = Robot2D(instance->atoms3lcd);
+          float goal_x = (float)atof(StrList[2]);
+          float goal_y = (float)atof(StrList[3]);
+          float goal_angle = (float)atof(StrList[4]);
+          robot_2d.setPose(goal_x, goal_y, goal_angle);
+          int16_t originX = instance->atoms3lcd.width() / 2; // [px]
+          int16_t originY = instance->atoms3lcd.height() - 10; // [px]
+          float distance = sqrt(goal_x * goal_x + goal_y * goal_y); // [m]
+          float scale = 50.0f / distance; // 1.0[m] = scale[px]
+          float draw_second = 2.0; // [s]
+          robot_2d.drawTrajectory(originX, originY, scale, draw_second);
+        }
       }
-      vTaskDelay(pdMS_TO_TICKS(1000));
     }
   }
 }

@@ -60,11 +60,20 @@ void Robot2D::draw(int16_t originX, int16_t originY, float scale) const {
  * @brief Draws the distance traveled on the specified LGFX display.
  */
 void Robot2D::drawDistance(int16_t x, int16_t y) const {
-  float distance = sqrt(x_ * x_ + y_ * y_);
+  // TODO: segmentation fault?
+  // float distance = sqrt(getX() * getX() + getY() * getY());
+  float distance = 1.498;
+  int32_t origCursorX = instance->atoms3lcd.getCursorX();
+  int32_t origCursorY = instance->atoms3lcd.getCursorY();
   instance->atoms3lcd.setCursor(x, y);
+  float origTextSize = instance->atoms3lcd.getTextSize();
   instance->atoms3lcd.setTextSize(1);
   instance->atoms3lcd.setTextColor(TFT_WHITE, TFT_BLACK);
-  instance->atoms3lcd.printf("Dist: %.2f m", distance);
+  char buffer[32];  // 十分な大きさのバッファを用意
+  sprintf(buffer, "Dist: %.2f m", distance);
+  instance->atoms3lcd.printColorText(String(buffer));
+  instance->atoms3lcd.setTextSize(origTextSize);
+  instance->atoms3lcd.setCursor(origCursorX, origCursorY);
 }
 
 /**
@@ -83,8 +92,9 @@ void Robot2D::drawTrajectory(int16_t originX, int16_t originY, float scale, floa
             getAngle() + orig_angle / div);
     instance->atoms3lcd.fillScreen(TFT_BLACK);
     draw(originX, originY, scale);
-    drawDistance(10, 10);
-    delay(draw_interval * 1000);
+    // drawDistance(originX + 10, originY + 5);
+    // drawDistance(10, 10);
+    vTaskDelay(pdMS_TO_TICKS(draw_interval * 1000));
   }
   // Reset robot pose
   setPose(orig_x, orig_y, orig_angle);
