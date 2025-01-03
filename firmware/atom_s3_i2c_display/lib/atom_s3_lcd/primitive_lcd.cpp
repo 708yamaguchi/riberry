@@ -55,6 +55,13 @@ void PrimitiveLCD::fillScreen(uint16_t color) {
   }
 }
 
+void PrimitiveLCD::fillTriangle(int x0, int y0, int x1, int y1, int x2, int y2, uint16_t color) {
+  if (lockLcd()) {
+    LGFX::fillTriangle(x0, y0, x1, y1, x2, y2, color);
+    unlockLcd();
+  }
+}
+
 void PrimitiveLCD::fillRect(int x1, int y1, int w, int h, uint16_t color) {
   if (lockLcd()) {
     LGFX::fillRect(x1, y1, w, h, color);

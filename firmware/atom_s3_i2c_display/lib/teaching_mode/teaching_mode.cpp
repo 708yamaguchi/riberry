@@ -23,19 +23,24 @@ void TeachingMode::task(void *parameter) {
       if (instance->atoms3lcd.color_str.isEmpty())
         instance->atoms3lcd.printColorText("Waiting for " + instance->getModeName());
       else {
-        int listSize = 2;
+        int listSize = 5;
         // Draw string
         char** StrList = (char**)malloc(listSize * sizeof(char*));
         int modeCount = instance->atoms3i2c.splitString(instance->atoms3lcd.color_str, ',', StrList, listSize);
-        instance->atoms3lcd.printColorText(String(StrList[1]));
+        instance->atoms3lcd.printColorText(String(StrList[0]));
         // Draw AR Marker if found
-        if (!String(StrList[0]).equals(String(""))) {
-          int marker_id = atoi(StrList[0]);
+        if (!String(StrList[1]).equals(String(""))) {
+          int marker_id = atoi(StrList[1]);
           int width = instance->atoms3lcd.width();
           int height = instance->atoms3lcd.height();
           int size = 64;
           instance->drawARMarker(marker_id, width - size - 5, height - size - 5, size);
         }
+        // Draw pose correction if specified
+        if (!String(StrList[2]).equals(String("")) &&
+            !String(StrList[3]).equals(String("")) &&
+            !String(StrList[4]).equals(String("")))
+          instance->drawARMarker(); // TODO
       }
       vTaskDelay(pdMS_TO_TICKS(1000));
     }

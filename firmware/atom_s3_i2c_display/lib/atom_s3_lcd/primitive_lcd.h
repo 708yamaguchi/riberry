@@ -12,6 +12,7 @@ public:
   void qrcode(const char *string, uint16_t x, uint16_t y, uint8_t width, uint8_t version);
   void printColorText(const String& input);
   void fillScreen(uint16_t color);
+  void fillTriangle(int x0, int y0, int x1, int y1, int x2, int y2, uint16_t color);
   void fillRect(int x1, int y1, int w, int h, uint16_t color);
   void fillCircle(int x, int y, int r, uint16_t color);
   void drawRect(int x1, int y1, int w, int h, uint16_t color);

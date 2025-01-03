@@ -1,49 +1,25 @@
 #include <atom_s3_lcd.h>
-#include <atom_s3_i2c.h>
-#include <atom_s3_button.h>
+#include <robot_2d.h>
 
-#include <display_information_mode.h>
-#include <display_qrcode_mode.h>
-#include <display_image_mode.h>
-#include <display_battery_graph_mode.h>
-#include <display_odom_mode.h>
-#include <servo_control_mode.h>
-#include <pressure_control_mode.h>
-#include <teaching_mode.h>
-
-#include <atom_s3_mode_manager.h>
-
-AtomS3Button atoms3button;
+// Initialize robot
 AtomS3LCD atoms3lcd;
-AtomS3I2C atoms3i2c(atoms3lcd, atoms3button);
-
-// Define all available modes
-DisplayInformationMode display_information_mode(atoms3lcd, atoms3i2c);
-DisplayQRcodeMode display_qrcode_mode(atoms3lcd, atoms3i2c);
-DisplayImageMode display_image_mode(atoms3lcd, atoms3i2c);
-DisplayBatteryGraphMode display_battery_graph_mode(atoms3lcd, atoms3i2c);
-DisplayOdomMode display_odom_mode(atoms3lcd, atoms3i2c);
-ServoControlMode servo_control_mode(atoms3lcd, atoms3i2c);
-PressureControlMode pressure_control_mode(atoms3lcd, atoms3i2c);
-TeachingMode teaching_mode(atoms3lcd, atoms3i2c);
-const std::vector<Mode*> allModes =
-  {&display_information_mode, &display_qrcode_mode, &display_image_mode, &display_battery_graph_mode,
-   &display_odom_mode,
-   &servo_control_mode, &pressure_control_mode, &teaching_mode,
-  };
-
-AtomS3ModeManager atoms3modemanager(atoms3lcd, atoms3button, atoms3i2c, allModes);
+Robot2D robot_2d(atoms3lcd);
 
 void setup() {
-  atoms3button.createTask(0);
-  atoms3i2c.createTask(0);
-  atoms3modemanager.createTask(0);
-  // By default, DisplayInformationMode and DisplayQRcodeMode are added
-  atoms3modemanager.addSelectedMode(display_information_mode);
-  atoms3modemanager.addSelectedMode(display_qrcode_mode);
-  atoms3modemanager.initializeSelectedModes();
-  atoms3modemanager.startCurrentMode();
 }
 
 void loop() {
+    // Set Goal
+    float goal_x = 0.5f;
+    float goal_y = 10.0f;
+    float goal_angle = M_PI * 1.25;
+    robot_2d.setPose(goal_x, goal_y, goal_angle);
+    // Visualize
+    int16_t originX = atoms3lcd.width() / 2; // [px]
+    int16_t originY = atoms3lcd.height() - 30; // [px]
+    float distance = sqrt(goal_x * goal_x + goal_y * goal_y);
+    float scale = 50.0f / distance; // 1.0[m] = scale[px]
+    float draw_second = 2.0; // [s]
+    robot_2d.drawTrajectory(originX, originY, scale, draw_second);
+    delay(1000);
 }
