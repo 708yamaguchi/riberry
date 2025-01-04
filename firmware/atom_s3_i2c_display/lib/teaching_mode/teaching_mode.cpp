@@ -59,7 +59,7 @@ void TeachingMode::task(void *parameter) {
           float goal_angle = (float)atof(StrList[4]);
           robot_2d.setPose(goal_x, goal_y, goal_angle);
           int16_t originX = instance->atoms3lcd.width() / 2; // [px]
-          int16_t originY = instance->atoms3lcd.height() - 10; // [px]
+          int16_t originY = instance->atoms3lcd.height() - 20; // [px]
           float distance = sqrt(goal_x * goal_x + goal_y * goal_y); // [m]
           float scale = 50.0f / distance; // 1.0[m] = scale[px]
           float draw_second = 1.5; // [s]

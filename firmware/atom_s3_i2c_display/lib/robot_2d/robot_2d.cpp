@@ -25,9 +25,9 @@ float Robot2D::getAngle() {
   return angle_;
 }
 
-void Robot2D::draw(int16_t originX, int16_t originY, float scale) const {
+void Robot2D::draw(int16_t originX, int16_t originY, float scale, uint32_t color) const {
   // Home-base pentagon shape definition
-  int16_t baseSize = 30; // Size of the robot in pixels
+  int16_t baseSize = 25; // Size of the robot in pixels
   // Pentagon vertices
   int16_t x1 = 0,             y1 = -baseSize / 2.5;  // Top
   int16_t x2 = -baseSize / 2, y2 = 0;              // Top left
@@ -51,9 +51,18 @@ void Robot2D::draw(int16_t originX, int16_t originY, float scale) const {
   int16_t screenY = originY - static_cast<int16_t>(y_ * scale);
 
   // Draw pentagon using triangles
-  instance->atoms3lcd.fillTriangle(screenX + rx1, screenY + ry1, screenX + rx2, screenY + ry2, screenX + rx3, screenY + ry3, TFT_GREEN);
-  instance->atoms3lcd.fillTriangle(screenX + rx2, screenY + ry2, screenX + rx3, screenY + ry3, screenX + rx4, screenY + ry4, TFT_GREEN);
-  instance->atoms3lcd.fillTriangle(screenX + rx3, screenY + ry3, screenX + rx4, screenY + ry4, screenX + rx5, screenY + ry5, TFT_GREEN);
+  instance->atoms3lcd.fillTriangle(screenX + rx1, screenY + ry1,
+                                   screenX + rx2, screenY + ry2,
+                                   screenX + rx3, screenY + ry3,
+                                   color);
+  instance->atoms3lcd.fillTriangle(screenX + rx2, screenY + ry2,
+                                   screenX + rx3, screenY + ry3,
+                                   screenX + rx4, screenY + ry4,
+                                   color);
+  instance->atoms3lcd.fillTriangle(screenX + rx3, screenY + ry3,
+                                   screenX + rx4, screenY + ry4,
+                                   screenX + rx5, screenY + ry5,
+                                   color);
 }
 
 /**
@@ -78,16 +87,21 @@ void Robot2D::drawTrajectory(int16_t originX, int16_t originY, float scale, floa
   float distance = sqrt(getX() * getX() + getY() * getY());
   float orig_x = getX(), orig_y = getY(), orig_angle = getAngle();
   // Initialize robot pose
-  setPose(0, 0, 0);
-  // Draw
+  float prev_x = 0, prev_y = 0, prev_angle = 0;
   float draw_interval = 0.05; // [s]
   int div = (int)(draw_second / draw_interval);
   for (int i = 0; i < div; i++) {
-    setPose(getX() + orig_x / div,
-            getY() + orig_y / div,
-            getAngle() + orig_angle / div);
     instance->atoms3lcd.fillScreen(TFT_BLACK);
-    draw(originX, originY, scale);
+    // Draw goal
+    setPose(orig_x, orig_y, orig_angle);
+    draw(originX, originY, scale, TFT_RED);
+    // Draw trajectory
+    prev_x += orig_x / div;
+    prev_y += orig_y / div;
+    prev_angle += orig_angle / div;
+    setPose(prev_x, prev_y, prev_angle);
+    draw(originX, originY, scale, TFT_GREEN);
+    // Draw distance string
     drawDistance(distance, 10, 10);
     vTaskDelay(pdMS_TO_TICKS(draw_interval * 1000));
   }

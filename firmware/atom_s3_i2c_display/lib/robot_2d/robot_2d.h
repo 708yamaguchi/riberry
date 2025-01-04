@@ -35,8 +35,7 @@ public:
      * This function calculates the robot's shape and orientation, then renders it on the display
      * along with the total distance traveled.
      */
-
-    void draw(int16_t originX, int16_t originY, float scale) const;
+    void draw(int16_t originX, int16_t originY, float scale, uint32_t color) const;
 
     /**
      * @brief Draws the distance traveled on the specified LGFX display.
