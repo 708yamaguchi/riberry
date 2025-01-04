@@ -53,7 +53,13 @@ class MotionManager:
             rospy.logerr('end_coords name does not match link name.')
         self.motion = []
         self.special_actions = []
+        # If IK failed, change the following variables
+        self.diff_x = None
+        self.diff_y = None
+        self.diff_angle = None
+
         self.start()
+
 
     def exec_with_error_handling(self, command):
         """Executes a command string with error handling.
@@ -275,6 +281,12 @@ class MotionManager:
             prev_time += elapsed_time
         message = 'Play finished'
         rospy.loginfo(message)
+
+        # TODO: set diff_x, diff_y, diff_angle after IK failed
+        self.diff_x = 0.12  # [m]
+        self.diff_y = 0.3  # [m]
+        self.diff_angle = 1.5  # [rad]
+
         return message
 
     def move_motion(self, motion, target_coords, local_coords):

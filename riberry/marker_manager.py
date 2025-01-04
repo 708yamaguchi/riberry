@@ -35,9 +35,6 @@ class MarkerManager:
         self.tfl = TransformListener(use_tf2=False) # Need 0.5[s] wait to initialize
         self.markers = []
         self.marker_msg = None
-        self.diff_x = None
-        self.diff_y = None
-        self.diff_angle = None
 
     def apriltag_cb(self, msg):
         """Callback function to handle AprilTag detection data.

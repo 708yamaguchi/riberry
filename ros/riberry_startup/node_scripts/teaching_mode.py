@@ -214,7 +214,7 @@ class TeachingMode(I2CBase):
             Instead, it reads these states and reflects them on the AtomS3 LCD.
 
             sent_str contains multiple information seperated by ','.
-            In detail, sent_str is 'main_sentense,marker_id,diff_x,diff_y,diff_angle'
+            In detail, sent_str is 'packet_header' + 'main_sentense,marker_id,diff_x,diff_y,diff_angle'
         """
         if self.mode != "TeachingMode":
             # When mode is changed,
@@ -223,6 +223,8 @@ class TeachingMode(I2CBase):
             self.play_list.reset_index()
             return
         sent_str = chr(PacketType.TEACHING_MODE)
+
+        # Set main sentense
         if self.state == State.WAIT:
             sent_str += 'Teaching mode\n\n'\
                 + '1tap: record\n'\
@@ -268,25 +270,31 @@ class TeachingMode(I2CBase):
                 sent_str += 'Play mode\n\n'\
                     + f'{self.play_list.selected_option(True)}\n\n'\
                     + '2tap:\n stop playing'
+
+        # Set marker id
         delimiter = ','
         sent_str += delimiter
         if self.teaching_manager.marker_manager.is_marker_recognized():
             marker_ids = self.teaching_manager.marker_manager.current_marker_ids()
             sent_str += str(marker_ids[0])
-        diff_x = self.teaching_manager.marker_manager.diff_x
-        diff_y = self.teaching_manager.marker_manager.diff_y
-        diff_angle = self.teaching_manager.marker_manager.diff_angle
+
+        # Set diff infomation
+        diff_x = self.teaching_manager.motion_manager.diff_x
+        diff_y = self.teaching_manager.motion_manager.diff_y
+        diff_angle = self.teaching_manager.motion_manager.diff_angle
         if any(x is None for x in [diff_x, diff_y, diff_angle]):
             sent_str += ',,,'
         else:
             sent_str += f',{diff_x},{diff_y},{diff_angle}'
-            self.teaching_manager.marker_manager.diff_x = None
-            self.teaching_manager.marker_manager.diff_y = None
-            self.teaching_manager.marker_manager.diff_angle = None
+        self.teaching_manager.motion_manager.diff_x = None
+        self.teaching_manager.motion_manager.diff_y = None
+        self.teaching_manager.motion_manager.diff_angle = None
         delimiter_num = 4
         if len([char for char in sent_str if char == delimiter]) != delimiter_num:
             rospy.logerr(f"sent string: {sent_str}")
             rospy.logerr(f"The number of delimiter '{delimiter}' must be {delimiter_num}")
+
+        # Send string
         self.send_string(sent_str)
 
     def load_teaching_files(self):
@@ -370,10 +378,6 @@ class TeachingMode(I2CBase):
         self.teaching_manager.stop()
         self.playing = False
         self.state = State.WAIT
-        # TODO: set diff_x, diff_y, diff_angle after IK failed
-        self.teaching_manager.marker_manager.diff_x = 0.5
-        self.teaching_manager.marker_manager.diff_y = 0.3
-        self.teaching_manager.marker_manager.diff_angle = 0.1
 
 if __name__ == '__main__':
     # Main
