@@ -62,8 +62,11 @@ void TeachingMode::task(void *parameter) {
           int16_t originY = instance->atoms3lcd.height() - 10; // [px]
           float distance = sqrt(goal_x * goal_x + goal_y * goal_y); // [m]
           float scale = 50.0f / distance; // 1.0[m] = scale[px]
-          float draw_second = 2.0; // [s]
-          robot_2d.drawTrajectory(originX, originY, scale, draw_second);
+          float draw_second = 1.5; // [s]
+          for (int i=0; i<2; i++) {
+            robot_2d.drawTrajectory(originX, originY, scale, draw_second);
+            vTaskDelay(pdMS_TO_TICKS(500));
+          }
         }
       }
     }

@@ -41,7 +41,7 @@ public:
     /**
      * @brief Draws the distance traveled on the specified LGFX display.
      */
-    void drawDistance(int16_t x, int16_t y) const;
+    void drawDistance(float distance, int16_t x, int16_t y) const;
 
     /**
      * @param Initial scale. Scale factor to convert meters to pixels.

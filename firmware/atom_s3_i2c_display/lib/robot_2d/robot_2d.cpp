@@ -27,7 +27,7 @@ float Robot2D::getAngle() {
 
 void Robot2D::draw(int16_t originX, int16_t originY, float scale) const {
   // Home-base pentagon shape definition
-  int16_t baseSize = 20; // Size of the robot in pixels
+  int16_t baseSize = 30; // Size of the robot in pixels
   // Pentagon vertices
   int16_t x1 = 0,             y1 = -baseSize / 2.5;  // Top
   int16_t x2 = -baseSize / 2, y2 = 0;              // Top left
@@ -59,19 +59,14 @@ void Robot2D::draw(int16_t originX, int16_t originY, float scale) const {
 /**
  * @brief Draws the distance traveled on the specified LGFX display.
  */
-void Robot2D::drawDistance(int16_t x, int16_t y) const {
-  // TODO: segmentation fault?
-  // float distance = sqrt(getX() * getX() + getY() * getY());
-  float distance = 1.498;
+void Robot2D::drawDistance(float distance, int16_t x, int16_t y) const {
   int32_t origCursorX = instance->atoms3lcd.getCursorX();
   int32_t origCursorY = instance->atoms3lcd.getCursorY();
   instance->atoms3lcd.setCursor(x, y);
   float origTextSize = instance->atoms3lcd.getTextSize();
-  instance->atoms3lcd.setTextSize(1);
+  instance->atoms3lcd.setTextSize(1.5);
   instance->atoms3lcd.setTextColor(TFT_WHITE, TFT_BLACK);
-  char buffer[32];  // 十分な大きさのバッファを用意
-  sprintf(buffer, "Dist: %.2f m", distance);
-  instance->atoms3lcd.printColorText(String(buffer));
+  instance->atoms3lcd.printColorText(String("Dist ") + String(distance) + String("[m]"));
   instance->atoms3lcd.setTextSize(origTextSize);
   instance->atoms3lcd.setCursor(origCursorX, origCursorY);
 }
@@ -80,7 +75,8 @@ void Robot2D::drawDistance(int16_t x, int16_t y) const {
  * @param Initial scale. Scale factor to convert meters to pixels.
  */
 void Robot2D::drawTrajectory(int16_t originX, int16_t originY, float scale, float draw_second) {
-  float orig_x = x_, orig_y = y_, orig_angle = angle_;
+  float distance = sqrt(getX() * getX() + getY() * getY());
+  float orig_x = getX(), orig_y = getY(), orig_angle = getAngle();
   // Initialize robot pose
   setPose(0, 0, 0);
   // Draw
@@ -92,8 +88,7 @@ void Robot2D::drawTrajectory(int16_t originX, int16_t originY, float scale, floa
             getAngle() + orig_angle / div);
     instance->atoms3lcd.fillScreen(TFT_BLACK);
     draw(originX, originY, scale);
-    // drawDistance(originX + 10, originY + 5);
-    // drawDistance(10, 10);
+    drawDistance(distance, 10, 10);
     vTaskDelay(pdMS_TO_TICKS(draw_interval * 1000));
   }
   // Reset robot pose
