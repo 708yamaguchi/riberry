@@ -29,7 +29,7 @@ void TeachingMode::task(void *parameter) {
       else {
         // Do nothing if atoms3lcd.color_str is not changed
         if (instance->prevColorStr.equals(instance->atoms3lcd.color_str)) {
-          vTaskDelay(pdMS_TO_TICKS(50));
+          vTaskDelay(pdMS_TO_TICKS(10));
           continue;
         }
         else {

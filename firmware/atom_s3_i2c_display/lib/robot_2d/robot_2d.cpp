@@ -67,6 +67,7 @@ void Robot2D::draw(int16_t originX, int16_t originY, float scale, uint32_t color
 
 /**
  * @brief Draws the distance traveled on the specified LGFX display.
+ * distance [m]
  */
 void Robot2D::drawDistance(float distance, int16_t x, int16_t y) const {
   int32_t origCursorX = instance->atoms3lcd.getCursorX();
@@ -75,7 +76,14 @@ void Robot2D::drawDistance(float distance, int16_t x, int16_t y) const {
   float origTextSize = instance->atoms3lcd.getTextSize();
   instance->atoms3lcd.setTextSize(1.5);
   instance->atoms3lcd.setTextColor(TFT_WHITE, TFT_BLACK);
-  instance->atoms3lcd.printColorText(String("Dist ") + String(distance) + String("[m]"));
+  String text;
+  if (distance < 0.01)
+    text = String("Dist ") + String(distance * 1000) + String(" mm");
+  else if (distance < 1.0)
+    text = String("Dist ") + String(distance * 100) + String(" cm");
+  else
+    text = String("Dist ") + String(distance) + String(" m");
+  instance->atoms3lcd.printColorText(text);
   instance->atoms3lcd.setTextSize(origTextSize);
   instance->atoms3lcd.setCursor(origCursorX, origCursorY);
 }
