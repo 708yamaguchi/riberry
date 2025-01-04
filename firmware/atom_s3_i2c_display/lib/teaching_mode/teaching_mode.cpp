@@ -16,6 +16,8 @@ void TeachingMode::task(void *parameter) {
     if (instance->atoms3i2c.checkTimeout()) {
       instance->atoms3lcd.drawNoDataReceived();
       instance->atoms3lcd.printColorText(instance->getModeName() + "\n");
+      instance->prevColorStr = "";
+      instance->atoms3lcd.color_str = "";
       vTaskDelay(pdMS_TO_TICKS(500));
       continue;
     }
@@ -24,6 +26,8 @@ void TeachingMode::task(void *parameter) {
       if (instance->atoms3lcd.color_str.isEmpty()) {
         instance->atoms3lcd.drawBlack();
         instance->atoms3lcd.printColorText("Waiting for " + instance->getModeName());
+        instance->prevColorStr = "";
+        instance->atoms3lcd.color_str = "";
         vTaskDelay(pdMS_TO_TICKS(500));
       }
       else {
