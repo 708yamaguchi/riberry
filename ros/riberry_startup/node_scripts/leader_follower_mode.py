@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 
 from datetime import datetime
+from enum import Enum
 import json
 import os
 import threading
 
 from colorama import Fore
-from enum import Enum
 from kxr_controller.kxr_interface import KXRROSRobotInterface
 import numpy as np
 import rosbag
@@ -165,10 +165,12 @@ class LeaderFollowerMode(Mode):
             self.ri[role] = KXRROSRobotInterface(
                 robot_model, namespace=namespace, controller_timeout=60.0
             )
-            if self.ri[role] is None:
-                self.additional_msg = f"Failed to Create {role} robot model"
-            else:
-                self.additional_msg = "Ready for leader/follower control"
+        if self.ri["leader"] is None:
+            self.additional_msg = "Failed to connect leader robot"
+        elif self.ri["follower"] is None:
+            self.additional_msg = "Failed to connect follower robot"
+        else:
+            self.additional_msg = "Ready for leader/follower control"
         self.original_cfg = self.ri["follower"].update_kxr_parameters()
         self.set_normal_cfg()
 
