@@ -110,10 +110,10 @@ class MP2760BatteryMonitor(threading.Thread):
         while self.set_adc_continuous_mode(set_bit=True) is None:
             logger.warning("[MP2760BatteryMonitor] Try to enable adc continuous mode.")
             time.sleep(1.0)
-        while self.set_safety_timer(set_bit=True) is None:
+        while self.set_safety_timer(set_bit=False) is None:
             logger.warning("[MP2760BatteryMonitor] Try to enable safety timer.")
             time.sleep(1.0)
-        self.limit_charge_current(400)
+        self.limit_charge_current(1000)
         logger.info(
             "[MP2760BatteryMonitor] Charge current limit: " +
             f"{self.read_charge_current_limit()}[mA]"

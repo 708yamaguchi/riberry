@@ -1,8 +1,45 @@
 <launch>
 
   <arg name="namespace" default="robot_a" />
+  <!-- If not connected to camera, low CPU usage -->
+  <arg name="camera" default="true" />
 
   <group ns="$(arg namespace)" >
+  </group>
+
+  <!-- For AtomS3 -->
+  <include file="$(find riberry_startup)/launch/all_modes.launch" />
+
+  <!-- Control servos -->
+  <include file="$(find kxr_controller)/launch/kxr_controller.launch">
+    <!-- <arg name="urdf_path" value="$(find yamaguchi_7axis_arm_no_worm_with_vacuum_base_ver10)/urdf/yamaguchi_7axis_arm_no_worm_with_vacuum_base_ver10.urdf" /> -->
+    <!-- <arg name="servo_config_path" value="$(find yamaguchi_7axis_arm_no_worm_with_vacuum_base_ver10)/config/servo_config.yaml" /> -->
+    <arg name="urdf_path" value="$(find yamaguchi_6axis_arm_with_vacuum_base)/urdf/yamaguchi_6axis_arm_with_vacuum_base.urdf" />
+    <arg name="servo_config_path" value="$(find yamaguchi_6axis_arm_with_vacuum_base)/config/servo_config.yaml" />
+    <arg name="publish_sensor" value="false" />
+    <arg name="control_pressure" value="true" />
+    <arg name="control_loop_rate" value="30" />
+    <arg name="read_current" default="false" />
+    <arg name="read_temperature" default="true" />
+    <arg name="temperature_limit" default="60" />
+  </include>
+
+  <!-- Speech to action -->
+  <include file="$(find riberry_startup)/launch/speech_to_action.launch">
+    <arg name="contexts_json" value="$(find riberry_startup)/sample/contexts.json" />
+    <!-- pervasive_sorcerer is the name of my Module LLM -->
+    <arg name="speech_to_text_topic_name" value="/pervasive_sorcerer/speech_to_text" />
+  </include>
+
+  <!-- Camera -->
+  <group if="$(arg camera)">
+    <include file="$(find riberry_startup)/launch/d405.launch">
+      <arg name="high_resolution" value="false" />
+      <arg name="enable_depth" value="true" />
+      <arg name="color_fps" value="30" />
+      <arg name="depth_fps" value="30" />
+    </include>
+    <include file="$(find riberry_startup)/launch/apriltag_detection.launch" />
   </group>
 
 </launch>
