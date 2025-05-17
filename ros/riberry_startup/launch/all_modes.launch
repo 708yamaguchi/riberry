@@ -23,6 +23,7 @@
       - WiFiSettingsMode <!-- Enabled by display_information.service -->
       - DataCollectionMode
       - LeaderFollowerMode
+      - BaseCorrectionMode
     </rosparam>
   </node>
 
@@ -80,6 +81,12 @@
       - /follower/camera/depth/image_rect_raw/compressedDepth
       - /follower/camera/extrinsics/depth_to_color
     </rosparam>
+  </node>
+
+  <node name="base_correction_mode"
+        pkg="riberry_startup" type="base_correction_mode.py"
+        output="screen"
+        respawn="true" clear_params="true">
   </node>
 
 </launch>
