@@ -187,6 +187,10 @@ void CommunicationBase::processPacket(const String& str, int offset) {
             instance->lcd.color_str = str.substring(offset);  // remove PacketType Header
             break;
 
+        case BASE_CORRECTION_MODE:
+            instance->lcd.color_str = str.substring(offset);  // remove PacketType Header
+            break;
+
         case BUTTON_STATE_REQUEST:
             requestEvent();
             break;

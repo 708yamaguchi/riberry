@@ -18,6 +18,7 @@ enum Name : uint8_t {
     WIFI_SETTINGS = 0x12,
     DATA_COLLECTION = 0x13,
     LEADER_FOLLOWER = 0x14,
+    BASE_CORRECTION = 0x15,
 
     FIRMWARE_UPDATE = 0xFF,
 };
@@ -54,6 +55,8 @@ inline String toString(Name name) {
             return "DataCollectionMode";
         case LEADER_FOLLOWER:
             return "LeaderFollowerMode";
+        case BASE_CORRECTION:
+            return "BaseCorrectionMode";
         case FIRMWARE_UPDATE:
             return "FirmwareUpdateMode";
         default:

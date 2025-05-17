@@ -17,6 +17,7 @@ class ModeType(Enum):
     WIFI_SETTINGS = 0x12
     DATA_COLLECTION = 0x13
     LEADER_FOLLOWER = 0x14
+    BASE_CORRECTION = 0x15
 
     FIRMWARE_UPDATE_MODE = 0xFF
 
@@ -37,6 +38,7 @@ MODE_TYPE_MAPPING = {
     ModeType.WIFI_SETTINGS: "WiFiSettingsMode",
     ModeType.DATA_COLLECTION: "DataCollectionMode",
     ModeType.LEADER_FOLLOWER: "LeaderFollowerMode",
+    ModeType.BASE_CORRECTION: "BaseCorrectionMode",
 
     ModeType.FIRMWARE_UPDATE_MODE: "FirmwareUpdateMode",
 }
