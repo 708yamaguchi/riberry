@@ -20,6 +20,13 @@ const int TX_PIN = 38;
 
 Dynamixel2Arduino dxl(DXL_SERIAL, EN_PIN);
 
+// モーターの状態を管理するための変数を定義
+// 0: 初期ストップ
+// 1: 正転中
+// 2: 正転後のストップ
+// 3: 逆転中
+int motorState = 0;
+
 void setupDXL()
 {
   DXL_SERIAL.begin(BAUDRATE, SERIAL_CONFIG, RX_PIN, TX_PIN, false, TIMEOUT);
@@ -44,26 +51,43 @@ void setup() {
 
   M5.Lcd.clear();
   M5.Lcd.setCursor(0, 0);
-  M5.Lcd.print("Press Button to Plus");
-  do { M5.update(); delay(10); } while (!M5.BtnA.isPressed());
-
-  delay(1000);
+  M5.Lcd.print("Stop\n\nPress to\nForward");
 }
 
 
 void loop() {
-  // dxl.setGoalCurrent(DXL_ID, 10, UNIT_PERCENT);
-  dxl.setGoalCurrent(DXL_ID, 500, UNIT_MILLI_AMPERE);
-  M5.Lcd.clear();
-  M5.Lcd.setCursor(0, 0);
-  M5.Lcd.print("Press Button to Minus");
-  do { M5.update(); delay(10); } while (!M5.BtnA.isPressed());
-  delay(1000);
-
-  dxl.setGoalCurrent(DXL_ID, -800, UNIT_MILLI_AMPERE);
-  M5.Lcd.clear();
-  M5.Lcd.setCursor(0, 0);
-  M5.Lcd.print("Press Button to Plus");
-  do { M5.update(); delay(10); } while (!M5.BtnA.isPressed());
-  delay(1000);
+  M5.update();
+  if (M5.BtnA.wasReleased()) {
+    switch (motorState) {
+      case 0: // 「初期ストップ」の状態でボタンが押されると、正転を開始
+        dxl.setGoalCurrent(DXL_ID, 500, UNIT_MILLI_AMPERE);
+        M5.Lcd.clear();
+        M5.Lcd.setCursor(0, 0);
+        M5.Lcd.print("Forward\n\nPress to\nStop");
+        motorState = 1;
+        break;
+      case 1: // 「正転中」の状態でボタンが押されると、モーターをストップ
+        dxl.setGoalCurrent(DXL_ID, 0, UNIT_MILLI_AMPERE);
+        M5.Lcd.clear();
+        M5.Lcd.setCursor(0, 0);
+        M5.Lcd.print("Stop\n\nPress to\nReverse");
+        motorState = 2;
+        break;
+      case 2: // 「正転後のストップ」の状態でボタンが押されると、逆転を開始
+        dxl.setGoalCurrent(DXL_ID, -800, UNIT_MILLI_AMPERE);
+        M5.Lcd.clear();
+        M5.Lcd.setCursor(0, 0);
+        M5.Lcd.print("Reverse\n\nPress to\nStop");
+        motorState = 3;
+        break;
+      case 3: // 「逆転中」の状態でボタンが押されると、モーターをストップさせ、初期状態に戻る
+        dxl.setGoalCurrent(DXL_ID, 0, UNIT_MILLI_AMPERE);
+        M5.Lcd.clear();
+        M5.Lcd.setCursor(0, 0);
+        M5.Lcd.print("Stop\n\nPress to\nForward");
+        motorState = 0;
+        break;
+    }
+  }
+  delay(10);
 }
