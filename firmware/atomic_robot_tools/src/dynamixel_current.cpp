@@ -20,12 +20,13 @@ const int TX_PIN = 38;
 
 Dynamixel2Arduino dxl(DXL_SERIAL, EN_PIN);
 
-// モーターの状態を管理するための変数を定義
-// 0: 初期ストップ
-// 1: 正転中
-// 2: 正転後のストップ
-// 3: 逆転中
+// motorStateは、0: 初期ストップ, 1: 正転中, 2: 正転後のストップ, 3: 逆転中
 int motorState = 0;
+String message;
+unsigned long lastDisplayTime = 0;
+const unsigned long displayInterval = 500; // [ms]
+bool isAutoMode = false; // trueだと、autoModeInterval[ms]おきにmotorStateが切り替わる。falseだとクリック時に切り替わる。
+const unsigned long autoModeInterval = 3000; // [ms]
 
 void setupDXL()
 {
@@ -41,11 +42,28 @@ void setupDXL()
 }
 /////////////////////////////////////////////////////////////////////////////
 
-float readVoltage(Dynamixel2Arduino dxl) {
+float readVoltage() {
   int32_t voltage_raw = dxl.readControlTableItem(PRESENT_INPUT_VOLTAGE, DXL_ID);
   return (float)voltage_raw / 10.0; // Unit [V]
 }
 
+float readTemperature() {
+  int32_t temperature = dxl.readControlTableItem(PRESENT_TEMPERATURE, DXL_ID);
+  return (float)temperature; // Unit [C]
+}
+
+void displayDXL(unsigned long interval) {
+  unsigned long currentTime = millis();
+  if (currentTime - lastDisplayTime >= interval) {
+    lastDisplayTime = currentTime;
+    M5.Lcd.clear();
+    M5.Lcd.setCursor(0, 0);
+    M5.Lcd.println(message);
+    M5.Lcd.printf("\n%.2f [V]\n", readVoltage());
+    M5.Lcd.printf("%d [mA]\n", (int)dxl.getPresentCurrent(DXL_ID, UNIT_MILLI_AMPERE));
+    M5.Lcd.printf("%d [C]\n", (int)readTemperature());
+  }
+}
 
 void setup() {
   M5.begin();
@@ -54,41 +72,48 @@ void setup() {
 
   setupDXL();
 
-  M5.Lcd.clear();
-  M5.Lcd.setCursor(0, 0);
-  M5.Lcd.println("Stop\n\nPress to\nForward");
-  M5.Lcd.printf("\n%.2f[V]\n", readVoltage(dxl));
+  message = "Stop\n\nPress to\nForward";
+  displayDXL(0);
 }
 
-
 void loop() {
-  M5.update();
-  if (M5.BtnA.wasReleased()) {
-    M5.Lcd.clear();
-    M5.Lcd.setCursor(0, 0);
+  if (!isAutoMode) {
+    M5.update();
+  }
+  if (isAutoMode || M5.BtnA.wasReleased()) {
     switch (motorState) {
       case 0: // 「初期ストップ」の状態でボタンが押されると、正転を開始
         dxl.setGoalCurrent(DXL_ID, 500, UNIT_MILLI_AMPERE);
-        M5.Lcd.println("Forward\n\nPress to\nStop");
+        message = "Forward\n\nPress to\nStop";
         motorState = 1;
         break;
       case 1: // 「正転中」の状態でボタンが押されると、モーターをストップ
         dxl.setGoalCurrent(DXL_ID, 0, UNIT_MILLI_AMPERE);
-        M5.Lcd.println("Stop\n\nPress to\nReverse");
+        message = "Stop\n\nPress to\nReverse";
         motorState = 2;
         break;
       case 2: // 「正転後のストップ」の状態でボタンが押されると、逆転を開始
         dxl.setGoalCurrent(DXL_ID, -800, UNIT_MILLI_AMPERE);
-        M5.Lcd.println("Reverse\n\nPress to\nStop");
+        message = "Reverse\n\nPress to\nStop";
         motorState = 3;
         break;
       case 3: // 「逆転中」の状態でボタンが押されると、モーターをストップさせ、初期状態に戻る
         dxl.setGoalCurrent(DXL_ID, 0, UNIT_MILLI_AMPERE);
-        M5.Lcd.println("Stop\n\nPress to\nForward");
+        message = "Stop\n\nPress to\nForward";
         motorState = 0;
         break;
     }
-    M5.Lcd.printf("\n%.2f[V]\n", readVoltage(dxl));
   }
-  delay(10);
+
+  // displayInterval[ms]おきに描画
+  if (isAutoMode) {
+    unsigned long startTime = millis();
+    while (millis() - startTime < autoModeInterval) {
+      displayDXL(displayInterval);
+      delay(10);
+    }
+  } else {
+    delay(10);
+    displayDXL(displayInterval);
+  }
 }
