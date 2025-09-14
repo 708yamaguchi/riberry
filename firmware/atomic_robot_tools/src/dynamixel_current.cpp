@@ -41,6 +41,11 @@ void setupDXL()
 }
 /////////////////////////////////////////////////////////////////////////////
 
+float readVoltage(Dynamixel2Arduino dxl) {
+  int32_t voltage_raw = dxl.readControlTableItem(PRESENT_INPUT_VOLTAGE, DXL_ID);
+  return (float)voltage_raw / 10.0; // Unit [V]
+}
+
 
 void setup() {
   M5.begin();
@@ -51,43 +56,39 @@ void setup() {
 
   M5.Lcd.clear();
   M5.Lcd.setCursor(0, 0);
-  M5.Lcd.print("Stop\n\nPress to\nForward");
+  M5.Lcd.println("Stop\n\nPress to\nForward");
+  M5.Lcd.printf("\n%.2f[V]\n", readVoltage(dxl));
 }
 
 
 void loop() {
   M5.update();
   if (M5.BtnA.wasReleased()) {
+    M5.Lcd.clear();
+    M5.Lcd.setCursor(0, 0);
     switch (motorState) {
       case 0: // 「初期ストップ」の状態でボタンが押されると、正転を開始
         dxl.setGoalCurrent(DXL_ID, 500, UNIT_MILLI_AMPERE);
-        M5.Lcd.clear();
-        M5.Lcd.setCursor(0, 0);
-        M5.Lcd.print("Forward\n\nPress to\nStop");
+        M5.Lcd.println("Forward\n\nPress to\nStop");
         motorState = 1;
         break;
       case 1: // 「正転中」の状態でボタンが押されると、モーターをストップ
         dxl.setGoalCurrent(DXL_ID, 0, UNIT_MILLI_AMPERE);
-        M5.Lcd.clear();
-        M5.Lcd.setCursor(0, 0);
-        M5.Lcd.print("Stop\n\nPress to\nReverse");
+        M5.Lcd.println("Stop\n\nPress to\nReverse");
         motorState = 2;
         break;
       case 2: // 「正転後のストップ」の状態でボタンが押されると、逆転を開始
         dxl.setGoalCurrent(DXL_ID, -800, UNIT_MILLI_AMPERE);
-        M5.Lcd.clear();
-        M5.Lcd.setCursor(0, 0);
-        M5.Lcd.print("Reverse\n\nPress to\nStop");
+        M5.Lcd.println("Reverse\n\nPress to\nStop");
         motorState = 3;
         break;
       case 3: // 「逆転中」の状態でボタンが押されると、モーターをストップさせ、初期状態に戻る
         dxl.setGoalCurrent(DXL_ID, 0, UNIT_MILLI_AMPERE);
-        M5.Lcd.clear();
-        M5.Lcd.setCursor(0, 0);
-        M5.Lcd.print("Stop\n\nPress to\nForward");
+        M5.Lcd.println("Stop\n\nPress to\nForward");
         motorState = 0;
         break;
     }
+    M5.Lcd.printf("\n%.2f[V]\n", readVoltage(dxl));
   }
   delay(10);
 }
