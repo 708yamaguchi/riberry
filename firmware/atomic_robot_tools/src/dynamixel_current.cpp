@@ -23,10 +23,17 @@ Dynamixel2Arduino dxl(DXL_SERIAL, EN_PIN);
 // motorStateは、0: 初期ストップ, 1: 正転中, 2: 正転後のストップ, 3: 逆転中
 int motorState = 0;
 String message;
+// Display
 unsigned long lastDisplayTime = 0;
 const unsigned long displayInterval = 500; // [ms]
+// Auto Mode
 bool isAutoMode = false; // trueだと、autoModeInterval[ms]おきにmotorStateが切り替わる。falseだとクリック時に切り替わる。
 const unsigned long autoModeInterval = 3000; // [ms]
+// Manual Mode
+unsigned long motorStartTime = 0;
+const unsigned long maxMotorDuration = 5000; // モーターの最大動作時間[ms]
+// Motor temperature threshold
+const int overheatThreshold = 60; // Motor overheat protection [C]
 
 void setupDXL()
 {
@@ -77,15 +84,45 @@ void setup() {
 }
 
 void loop() {
+  // ループの最初に温度をチェック。温度がoverheatThreshold度以上なら、モータを緊急停止
+  if (readTemperature() >= overheatThreshold) {
+      message = "High Temperature\nStop using DXL";
+      motorState = 0;
+      dxl.setGoalCurrent(DXL_ID, 0, UNIT_MILLI_AMPERE);
+      M5.Lcd.setTextColor(TFT_WHITE, TFT_RED);
+      displayDXL(displayInterval);
+      M5.Lcd.setTextColor(TFT_WHITE, TFT_BLACK);
+      delay(1000);
+      return;
+  }
+
   if (!isAutoMode) {
     M5.update();
+
+    // motorStateが1（正転中）または3（逆転中）でmaxMotorDuration[ms]以上経過した場合、
+    // モータへの負荷を下げるため、自動的にストップする。
+    if ((motorState == 1 || motorState == 3) && (millis() - motorStartTime > maxMotorDuration)) {
+      if (motorState == 1) {
+        // 正転中の場合、停止させて次の状態(2)へ
+        dxl.setGoalCurrent(DXL_ID, 0, UNIT_MILLI_AMPERE);
+        message = "Stop\n\nPress to\nReverse";
+        motorState = 2;
+      } else if (motorState == 3) {
+        // 逆転中の場合、停止させて新しい状態(4)へ
+        dxl.setGoalCurrent(DXL_ID, 0, UNIT_MILLI_AMPERE);
+        message = "Stop\n\nPress to\nForward";
+        motorState = 0;
+      }
+    }
   }
+
   if (isAutoMode || M5.BtnA.wasReleased()) {
     switch (motorState) {
       case 0: // 「初期ストップ」の状態でボタンが押されると、正転を開始
         dxl.setGoalCurrent(DXL_ID, 500, UNIT_MILLI_AMPERE);
         message = "Forward\n\nPress to\nStop";
         motorState = 1;
+        motorStartTime = millis();
         break;
       case 1: // 「正転中」の状態でボタンが押されると、モーターをストップ
         dxl.setGoalCurrent(DXL_ID, 0, UNIT_MILLI_AMPERE);
@@ -96,6 +133,7 @@ void loop() {
         dxl.setGoalCurrent(DXL_ID, -800, UNIT_MILLI_AMPERE);
         message = "Reverse\n\nPress to\nStop";
         motorState = 3;
+        motorStartTime = millis();
         break;
       case 3: // 「逆転中」の状態でボタンが押されると、モーターをストップさせ、初期状態に戻る
         dxl.setGoalCurrent(DXL_ID, 0, UNIT_MILLI_AMPERE);
