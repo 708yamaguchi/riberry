@@ -8,11 +8,14 @@ import torch
 import threading
 import os
 import io
+import matplotlib
+matplotlib.use('Agg') 
 import matplotlib.pyplot as plt
 
 # ROS Messages & Services
 from sensor_msgs.msg import Image, CameraInfo
-from std_srvs.srv import Trigger, TriggerResponse
+from geometry_msgs.msg import Pose
+from riberry_startup.srv import VisualPose, VisualPoseResponse
 from cv_bridge import CvBridge
 import tf.transformations as tft
 
@@ -27,15 +30,30 @@ from transformers import AutoProcessor, AutoModelForCausalLM
 from requests.exceptions import ChunkedEncodingError
 from dataclasses import dataclass
 
-# --- 定数: データ保存場所 (決め打ち) ---
-SAVE_DIR = "/tmp/visual_pose_estimator"
-PATH_RGB = os.path.join(SAVE_DIR, "ref_rgb.png")
-PATH_DEPTH = os.path.join(SAVE_DIR, "ref_depth.png") # 16bit PNG
-PATH_INFO = os.path.join(SAVE_DIR, "ref_info.yaml")
-PATH_PROMPT = os.path.join(SAVE_DIR, "ref_prompt.txt")
+import re
+from riberry.filecheck_utils import get_cache_dir
+
+# --- 定数: データ保存場所 ---
+# riberryのキャッシュディレクトリ下にサブディレクトリを作成
+CACHE_ROOT = get_cache_dir()
+SAVE_DIR = os.path.join(CACHE_ROOT, "visual_pose_estimator")
 
 if not os.path.exists(SAVE_DIR):
     os.makedirs(SAVE_DIR)
+
+def get_file_paths(prompt):
+    """プロンプト名に基づいてファイルパスを生成する"""
+    # ファイル名に使えない文字をアンダースコアに置換 (例: "coffee box" -> "coffee_box")
+    safe_prompt = re.sub(r'[^a-zA-Z0-9]', '_', prompt).strip('_')
+    if not safe_prompt:
+        safe_prompt = "default"
+        
+    return {
+        "rgb": os.path.join(SAVE_DIR, f"ref_rgb_{safe_prompt}.png"),
+        "depth": os.path.join(SAVE_DIR, f"ref_depth_{safe_prompt}.png"),
+        "info": os.path.join(SAVE_DIR, f"ref_info_{safe_prompt}.yaml"),
+    }
+
 
 @dataclass
 class MatchingResult:
@@ -196,8 +214,6 @@ class VisualPoseEstimatorNode:
         
         # --- Parameters ---
         self.visualize = rospy.get_param("~visualize", True)
-        self.prompt_param = rospy.get_param("~prompt", "") 
-        
         self.bridge = CvBridge()
         
         # Load Models
@@ -228,9 +244,8 @@ class VisualPoseEstimatorNode:
         self.debug_pub = rospy.Publisher("~debug_image", Image, queue_size=1)
 
         # --- Services ---
-        rospy.Service("save_reference", Trigger, self.handle_save_reference)
-        rospy.Service("calculate_offset", Trigger, self.handle_calculate_offset)
-
+        rospy.Service("save_reference", VisualPose, self.handle_save_reference)
+        rospy.Service("calculate_offset", VisualPose, self.handle_calculate_offset)
         rospy.loginfo("==============================================")
         rospy.loginfo("   Visual Pose Estimator Node is READY !!     ")
         rospy.loginfo("   Models loaded. Waiting for services...     ")
@@ -268,73 +283,82 @@ class VisualPoseEstimatorNode:
     # Service Handlers
     # -------------------------------------------------------------------------
 
+    # -------------------------------------------------------------------------
+    # Service Handlers (Updated for VisualPose.srv)
+    # -------------------------------------------------------------------------
+
     def handle_save_reference(self, req):
-        """Save current image as reference"""
-        rospy.loginfo("Service: save_reference called.")
-        color, depth = self.capture_snapshot()
+        """Save reference for the given prompt"""
+        # リクエストからプロンプトを取得
+        target_prompt = req.prompt
+        if not target_prompt:
+            target_prompt = "default"
         
+        paths = get_file_paths(target_prompt)
+        rospy.loginfo(f"Service: save_reference called. Prompt='{target_prompt}'")
+        
+        color, depth = self.capture_snapshot()
         if color is None:
-            return TriggerResponse(success=False, message="Timeout: No image received.")
+            return VisualPoseResponse(success=False, message="Timeout: No image received", pose=Pose())
 
-        cv2.imwrite(PATH_RGB, color)
-        cv2.imwrite(PATH_DEPTH, depth)
-
-        prompt_to_save = self.prompt_param
-        with open(PATH_PROMPT, 'w') as f:
-            f.write(prompt_to_save)
+        # 画像と情報の保存
+        cv2.imwrite(paths["rgb"], color)
+        cv2.imwrite(paths["depth"], depth)
         
         if self.camera_info_K is not None:
-            fs = cv2.FileStorage(PATH_INFO, cv2.FILE_STORAGE_WRITE)
+            fs = cv2.FileStorage(paths["info"], cv2.FILE_STORAGE_WRITE)
             fs.write("K", self.camera_info_K)
             fs.write("D", self.camera_info_D)
             fs.release()
-        
-        rospy.loginfo(f"Reference saved to {SAVE_DIR} (Prompt: '{prompt_to_save}')")
-        return TriggerResponse(success=True, message=f"Saved to {SAVE_DIR}")
+            
+        return VisualPoseResponse(success=True, message=f"Saved for '{target_prompt}'", pose=Pose())
 
     def handle_calculate_offset(self, req):
-        """Calculate pose offset"""
-        rospy.loginfo("Service: calculate_offset called.")
+        """Calculate offset using the reference of the given prompt"""
+        # リクエストからプロンプトを取得
+        target_prompt = req.prompt
+        if not target_prompt:
+            target_prompt = "default"
         
-        if not os.path.exists(PATH_RGB):
-            return TriggerResponse(success=False, message="Reference files not found. Call save_reference first.")
+        paths = get_file_paths(target_prompt)
+        rospy.loginfo(f"Service: calculate_offset called. Prompt='{target_prompt}'")
         
-        ref_color = cv2.imread(PATH_RGB)
-        ref_depth = cv2.imread(PATH_DEPTH, cv2.IMREAD_UNCHANGED)
+        # 1. 基準ファイルの確認
+        if not os.path.exists(paths["rgb"]):
+            msg = f"No reference found for '{target_prompt}'"
+            rospy.logwarn(msg)
+            return VisualPoseResponse(success=False, message=msg, pose=Pose())
         
-        ref_prompt = ""
-        if os.path.exists(PATH_PROMPT):
-            with open(PATH_PROMPT, 'r') as f:
-                ref_prompt = f.read().strip()
-
+        ref_color = cv2.imread(paths["rgb"])
+        ref_depth = cv2.imread(paths["depth"], cv2.IMREAD_UNCHANGED)
+        
+        # Camera Info読み込み
         K_mat = self.camera_info_K
         D_mat = self.camera_info_D
-        if os.path.exists(PATH_INFO):
-             fs = cv2.FileStorage(PATH_INFO, cv2.FILE_STORAGE_READ)
-             K_node = fs.getNode("K")
-             D_node = fs.getNode("D")
-             if not K_node.empty(): K_mat = K_node.mat()
-             if not D_node.empty(): D_mat = D_node.mat()
+        if os.path.exists(paths["info"]):
+             fs = cv2.FileStorage(paths["info"], cv2.FILE_STORAGE_READ)
+             if not fs.getNode("K").empty(): K_mat = fs.getNode("K").mat()
+             if not fs.getNode("D").empty(): D_mat = fs.getNode("D").mat()
              fs.release()
         
         if K_mat is None:
-             return TriggerResponse(success=False, message="Camera Info not available.")
+             return VisualPoseResponse(success=False, message="No Camera Info", pose=Pose())
 
+        # 2. 現在画像のキャプチャ
         curr_color, curr_depth = self.capture_snapshot()
         if curr_color is None:
-            return TriggerResponse(success=False, message="Timeout: No current image.")
+            return VisualPoseResponse(success=False, message="Timeout: No current image", pose=Pose())
 
-        # Segmentation
-        mask_ref = None
-        mask_curr = None
-        if ref_prompt:
-            rospy.loginfo(f"Applying segmentation with prompt: '{ref_prompt}'")
-            res_ref, _ = self.segmenter.process_image(ref_color, ref_prompt)
+        # 3. セグメンテーション (Prompt指定時のみ)
+        mask_ref, mask_curr = None, None
+        if target_prompt != "default":
+            rospy.loginfo(f"Applying segmentation: '{target_prompt}'")
+            res_ref, _ = self.segmenter.process_image(ref_color, target_prompt)
             mask_ref = self.segmenter.create_mask(res_ref, ref_color.shape)
-            res_curr, _ = self.segmenter.process_image(curr_color, ref_prompt)
+            res_curr, _ = self.segmenter.process_image(curr_color, target_prompt)
             mask_curr = self.segmenter.create_mask(res_curr, curr_color.shape)
 
-        # Matching
+        # 4. マッチング
         img1_match = ref_color.copy()
         img2_match = curr_color.copy()
         if mask_ref is not None: img1_match[mask_ref == 0] = 0
@@ -342,41 +366,45 @@ class VisualPoseEstimatorNode:
 
         res = self.feature_matcher.process_images(img1_match, img2_match)
         if res is None:
-            return TriggerResponse(success=False, message="Not enough matches.")
+            return VisualPoseResponse(success=False, message="Not enough matches", pose=Pose())
 
-        # --- 【修正】Tensorに変換してからフィルタリング ---
-        # res.inliers は numpy 配列。これをGPU上のTensorのインデックスとして使うとエラーになる場合があるため
-        # 明示的に bool Tensor に変換して device を合わせる
-        inliers_bool_np = res.inliers[:,0].astype(bool)
-        inliers_bool_tensor = torch.from_numpy(inliers_bool_np).to(res.idxs.device)
+        # Inliersフィルタリング
+        if hasattr(res.inliers, 'cpu'): inliers_bool_np = res.inliers[:,0].cpu().numpy().astype(bool)
+        else: inliers_bool_np = res.inliers[:,0].astype(bool)
         
+        inliers_bool_tensor = torch.from_numpy(inliers_bool_np).to(res.idxs.device)
         inlier_mkpts1 = res.kps1[res.idxs[:, 0][inliers_bool_tensor]].cpu().numpy()
         inlier_mkpts2 = res.kps2[res.idxs[:, 1][inliers_bool_tensor]].cpu().numpy()
 
-        # Pose Estimation
+        # 5. Pose推定
         success, R, t = self.estimate_pose_pnp(inlier_mkpts1, inlier_mkpts2, ref_depth, K_mat, D_mat)
-        
         if not success:
-            return TriggerResponse(success=False, message="PnP Failed.")
+            return VisualPoseResponse(success=False, message="PnP Failed", pose=Pose())
 
-        # Format Result
+        # 6. 結果の作成 (Pose型のメッセージに詰める)
         T_mat = np.eye(4)
         T_mat[:3, :3] = R
         q = tft.quaternion_from_matrix(T_mat)
-
-        x_mm = t[0][0] * 1000
-        y_mm = t[1][0] * 1000
-        z_mm = t[2][0] * 1000
-        total_mm = np.linalg.norm(t) * 1000
-        rospy.loginfo(f"Camera Move (Camera Frame): X={x_mm:.1f}mm, Y={y_mm:.1f}mm, Z={z_mm:.1f}mm | Total={total_mm:.1f}mm")
         
-        res_str = f"{t[0][0]:.6f},{t[1][0]:.6f},{t[2][0]:.6f},{q[0]:.6f},{q[1]:.6f},{q[2]:.6f},{q[3]:.6f}"
-        rospy.loginfo(f"Pose Calculated: {res_str}")
+        pose_msg = Pose()
+        pose_msg.position.x = t[0][0]
+        pose_msg.position.y = t[1][0]
+        pose_msg.position.z = t[2][0]
+        pose_msg.orientation.x = q[0]
+        pose_msg.orientation.y = q[1]
+        pose_msg.orientation.z = q[2]
+        pose_msg.orientation.w = q[3]
 
-        # Visualization
+        # ログ表示用
+        x_mm, y_mm, z_mm = t[0][0]*1000, t[1][0]*1000, t[2][0]*1000
+        total_mm = np.linalg.norm(t)*1000
+        msg_str = f"Move: X={x_mm:.1f}, Y={y_mm:.1f}, Z={z_mm:.1f} (Total {total_mm:.1f}mm)"
+        rospy.loginfo(f"[{target_prompt}] {msg_str}")
+
+        # 可視化 (Debug Image配信)
         self.publish_debug_image(res, ref_color, curr_color, mask_ref, mask_curr)
-        
-        return TriggerResponse(success=True, message=res_str)
+
+        return VisualPoseResponse(success=True, message=msg_str, pose=pose_msg)
 
     def estimate_pose_pnp(self, pts1, pts2, depth1, K, D):
         fx, fy = K[0, 0], K[1, 1]
@@ -473,7 +501,7 @@ class VisualPoseEstimatorNode:
         buf = io.BytesIO()
         plt.savefig(buf, format='png')
         buf.seek(0)
-        plt.show()  # 計算が止まるので、注意
+        # plt.show()  # 計算が止まるので、注意
         plt.close(fig)
 
         arr = np.frombuffer(buf.getvalue(), dtype=np.uint8)

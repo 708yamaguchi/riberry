@@ -1,6 +1,5 @@
 <launch>
   <arg name="visualize" default="true" />
-  <arg name="prompt" default="" />
 
   <node pkg="image_transport" type="republish" name="republish_rgb" 
         args="compressed in:=/camera/color/image_raw raw out:=/decompressed/camera/color/image_raw" />
@@ -10,7 +9,6 @@
 
   <node pkg="riberry_startup" type="visual_pose_estimator.py" name="pose_estimator" output="screen">
     <param name="visualize" value="(arg visualize)" />
-    <param name="prompt" value="$(arg prompt)" />
   </node>
 
 </launch>
