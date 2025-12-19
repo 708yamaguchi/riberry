@@ -1,0 +1,14 @@
+<launch>
+  <arg name="prompt" default="" />
+
+  <node pkg="image_transport" type="republish" name="republish_rgb" 
+        args="compressed in:=/camera/color/image_raw raw out:=/decompressed/camera/color/image_raw" />
+
+  <node pkg="image_transport" type="republish" name="republish_depth" 
+        args="compressedDepth in:=/camera/aligned_depth_to_color/image_raw raw out:=/decompressed/camera/aligned_depth_to_color/image_raw" />
+
+  <node pkg="riberry_startup" type="pose_estimation_ros_with_mask.py" name="pose_estimator" output="screen">
+    <param name="prompt" value="$(arg prompt)" />
+  </node>
+
+</launch>
