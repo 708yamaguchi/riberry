@@ -336,6 +336,8 @@ class CameraPoseEstimator:
         self.color_image2 = None
         self.depth_image2 = None
 
+        rospy.Subscriber("/camera/color/camera_info", CameraInfo, self.color_info_callback)
+        rospy.Subscriber("/camera/aligned_depth_to_color/camera_info", CameraInfo, self.depth_info_callback)
         self.rgb_camera_matrix = None
         self.depth_camera_matrix = None
         self.dist_coeffs = None
@@ -344,26 +346,32 @@ class CameraPoseEstimator:
 
         self.color_image_sub = Subscriber("/decompressed/camera/color/image_raw", Image)
         self.depth_image_sub = Subscriber("/decompressed/camera/aligned_depth_to_color/image_raw", Image)
-        self.color_info_sub = Subscriber("/camera/color/camera_info", CameraInfo)
-        self.depth_info_sub = Subscriber("/camera/aligned_depth_to_color/camera_info", CameraInfo)
         self.latest_color_image = None
         self.latest_depth_image = None
+        self.latest_timestamp = rospy.Time(0)
 
         self.sync = ApproximateTimeSynchronizer(
-            [self.color_image_sub, self.depth_image_sub, self.color_info_sub, self.depth_info_sub],
-            queue_size=10,
+            [self.color_image_sub, self.depth_image_sub],
+            queue_size=3,
             slop=0.1
         )
         self.sync.registerCallback(self.image_callback)
 
-    def image_callback(self, color_img_msg, depth_img_msg, color_info_msg, depth_info_msg):
+    def color_info_callback(self, msg):
+        if self.rgb_camera_matrix is None:
+            self.rgb_camera_matrix, self.dist_coeffs = parse_camera_info(msg)
+            rospy.loginfo("Received RGB Camera Intrinsics")
+
+    def depth_info_callback(self, msg):
+        if self.depth_camera_matrix is None:
+            self.depth_camera_matrix, _ = parse_camera_info(msg)
+            rospy.loginfo("Received Depth Camera Intrinsics")
+
+    def image_callback(self, color_img_msg, depth_img_msg):
         try:
             self.latest_color_image = self.bridge.imgmsg_to_cv2(color_img_msg, color_img_msg.encoding)
             self.latest_depth_image = self.bridge.imgmsg_to_cv2(depth_img_msg, depth_img_msg.encoding)
-            if self.rgb_camera_matrix is None:
-                self.rgb_camera_matrix, self.dist_coeffs = parse_camera_info(color_info_msg)
-                self.depth_camera_matrix, _ = parse_camera_info(depth_info_msg)
-                rospy.loginfo("Camera intrinsics received.")
+            self.latest_timestamp = color_img_msg.header.stamp
         except Exception as e:
             rospy.logerr(f"Error in image callback: {e}")
 
@@ -382,24 +390,33 @@ class CameraPoseEstimator:
             rospy.sleep(0.1)
         return False
 
-    def capture_first_images(self):
-        self.color_image1 = self.latest_color_image
-        self.depth_image1 = self.latest_depth_image
-        if self.color_image1 is not None and self.depth_image1 is not None:
-            rospy.loginfo("Captured first color/depth image.")
-        else:
-            rospy.logerr("Failed to captured first color/depth image.")
-        return self.color_image1, self.depth_image1
-
-    def capture_second_images(self):
-        self.color_image2 = self.latest_color_image
-        self.depth_image2 = self.latest_depth_image
-        if self.color_image2 is not None and self.depth_image2 is not None:
-            rospy.loginfo("Captured second color/depth image.")
-        else:
-            rospy.logerr("Failed to captured second color/depth image.")
-        return self.color_image2, self.depth_image2
-
+    def capture_new_image(self, timeout=10.0):
+        rospy.loginfo("Waiting for a FRESH image...")
+        
+        # 1. まず、現在の最新画像のタイムスタンプを基準として保存
+        # (まだ画像が来ていない場合は 0 になっているので、とにかく何か来るまで待つ挙動になる)
+        base_timestamp = self.latest_timestamp
+        
+        rate = rospy.Rate(20) # チェック頻度
+        wait_start = rospy.Time.now()
+        
+        while not rospy.is_shutdown():
+            # タイムアウト判定
+            if (rospy.Time.now() - wait_start).to_sec() > timeout:
+                rospy.logwarn("Timeout while waiting for new image.")
+                return None, None
+            # 「PCの現在時刻」ではなく、「さっきまでの画像の時刻(base_timestamp)」より
+            # 新しいものが来たら採用する。これなら時計がズレていてもOK。
+            if self.latest_timestamp > base_timestamp:
+                if self.latest_color_image is not None and self.latest_depth_image is not None:
+                    # 念のため、画像が空でないかチェック
+                    if self.latest_color_image.size > 0:
+                        return self.latest_color_image.copy(), self.latest_depth_image.copy()
+            
+            rate.sleep()
+            
+        return None, None
+    
     def process_images(self, mask1=None, mask2=None):
         if any(x is None for x in (self.color_image1, self.color_image2, self.depth_image1, self.depth_image2)):
             rospy.logwarn("Missing images for processing.")
@@ -558,15 +575,33 @@ if __name__ == "__main__":
         capture_stage = 0
         while not rospy.is_shutdown():
             if capture_stage == 0:
-                camera_pose_estimator.wait_for_images(10)
-                input("Press ENTER to capture first image...")
-                color1, _ = camera_pose_estimator.capture_first_images()
-                capture_stage = 1
+                rospy.loginfo("Waiting for camera connection...")
+                while not camera_pose_estimator.wait_for_images(5.0):
+                    rospy.loginfo("Still waiting for the first image pair...")
+                rospy.loginfo("Camera is ready!")
+                # Capture image
+                input("Press ENTER to capture FIRST image (Move camera to pos 1)...")
+                color1, depth1 = camera_pose_estimator.capture_new_image()
+                
+                if color1 is not None:
+                    # Capture用の変数を更新
+                    camera_pose_estimator.color_image1 = color1
+                    camera_pose_estimator.depth_image1 = depth1
+                    capture_stage = 1
+                else:
+                    rospy.logerr("Failed to capture 1st image. Retrying...")
+
             elif capture_stage == 1:
-                camera_pose_estimator.wait_for_images(10)
-                input("Press ENTER to capture second image...")
-                color2, _ = camera_pose_estimator.capture_second_images()
-                capture_stage = 2
+                input("Press ENTER to capture SECOND image (Move camera to pos 2)...")
+                color2, depth2 = camera_pose_estimator.capture_new_image()
+                
+                if color2 is not None:
+                    # Capture用の変数を更新
+                    camera_pose_estimator.color_image2 = color2
+                    camera_pose_estimator.depth_image2 = depth2
+                    capture_stage = 2
+                else:
+                    rospy.logerr("Failed to capture 2nd image. Retrying...")
             else:
                 break
         # Apply mask
