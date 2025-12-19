@@ -1,0 +1,86 @@
+{
+  "action_registry": {
+    "wipe": {
+      "trajectory_type": "zigzag",
+      "margin": 2.5,
+      "rotation_axis": "y"
+    },
+    "collect": {
+      "trajectory_type": "radial",
+      "margin": 1.1,
+      "rotation_axis": true
+    },
+    "paint": {
+      "trajectory_type": "zigzag",
+      "margin": 0.95,
+      "rotation_axis": true
+    },
+    "apply glue": {
+      "trajectory_type": "zigzag",
+      "margin": 0.8,
+      "rotation_axis": "x"
+    },
+    "ironing": {
+      "trajectory_type": "zigzag",
+      "margin": 0.95,
+      "rotation_axis": "x"
+    },
+    "stir": {
+      "trajectory_type": "spiral",
+      "margin": 0.8,
+      "rotation_axis": true
+    },
+    "press": {
+      "trajectory_type": "press",
+      "margin": 0.75,
+      "rotation_axis": "x"
+    },
+    "trace": {
+      "trajectory_type": "trace",
+      "margin": 1.0,
+      "rotation_axis": "x"
+    },
+    "lint roller": {
+      "trajectory_type": "trace",
+      "margin": 0.85,
+      "rotation_axis": "y"
+    },
+    "blow dry": {
+      "trajectory_type": "spiral",
+      "margin": 1.0,
+      "rotation_axis": "x"
+    },
+    "brush": {
+      "trajectory_type": "trace",
+      "margin": 3.0,
+      "rotation_axis": "x"
+    }
+  },
+  "object_registry": {
+    "green area": "segmentation",
+    "golden plate": "segmentation",
+    "metalic plate": "segmentation",
+    "black plate": "segmentation",
+    "wood tray": "segmentation",
+    "coffee stain": "segmentation",
+    "coffee powder": "segmentation",
+    "white washbasin": "segmentation",
+    "inside of cooking pot": "segmentation",
+    "dark green sweater": "segmentation",
+    "white sweater": "segmentation",
+    "black scarf": "segmentation",
+    "black pants": "segmentation",
+    "checkered handkerchief": "segmentation",
+    "checkered scarf": "segmentation",
+    "white cloth": "segmentation",
+    "dust bunny": "segmentation",
+    "doormat": "segmentation",
+    "pillow": "segmentation",
+    "blue splatter": "segmentation",
+    "hair": "segmentation",
+    "bottom groove": "segmentation",
+    "sink drain": "segmentation",
+    "screws": "detection"
+  },
+  "valid_units": ["times", "minutes"]
+}

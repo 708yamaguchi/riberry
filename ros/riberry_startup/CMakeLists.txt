@@ -41,12 +41,15 @@ add_message_files(
 add_service_files(
   FILES
   RegisterContexts.srv
-  SelectMotion.srv  
+  SelectMotion.srv
+  TaskInstruction.srv
+  VisualPose.srv
 )
 
 generate_messages(
   DEPENDENCIES
   std_msgs
+  geometry_msgs
 )
 
 # Include directories

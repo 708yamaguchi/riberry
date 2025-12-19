@@ -1,11 +1,11 @@
 <launch>
 
-  <arg name="namespace" default="robot_a" />
+  <arg name="namespace" default="$(optenv ROS_NAMESPACE)" />
+  <arg name="tf_prefix" value="$(arg namespace)_camera_" if="$(eval arg('namespace') != '')" />
+  <arg name="tf_prefix" value="camera_" unless="$(eval arg('namespace') != '')" />
+
   <!-- If not connected to camera, low CPU usage -->
   <arg name="camera" default="true" />
-
-  <group ns="$(arg namespace)" >
-  </group>
 
   <!-- For AtomS3 -->
   <include file="$(find riberry_startup)/launch/all_modes.launch" />
@@ -36,7 +36,7 @@
   <!-- Camera -->
   <group if="$(arg camera)">
     <include file="$(find riberry_startup)/launch/d405.launch">
-      <arg name="high_resolution" value="true" />
+      <arg name="high_resolution" value="false" />
       <arg name="enable_depth" value="true" />
       <arg name="color_fps" value="5" />
       <arg name="depth_fps" value="5" />
@@ -45,7 +45,7 @@
 
     <!-- yamaguchi_6axis_arm_nejineji to D405 -->
     <node pkg="tf2_ros" type="static_transform_publisher" name="module5_camera_link_to_camera_link"
-      args="0 0 0 0 0 0 $(optenv ROS_NAMESPACE)/module5_camera_link $(optenv ROS_NAMESPACE)/camera_link" />
+      args="0 0 0 0 0 0 $(arg namespace)/module5_camera_link $(arg tf_prefix)link" />
   </group>
 
 </launch>

@@ -1,0 +1,14 @@
+<launch>
+  <arg name="visualize" default="true" />
+
+  <node pkg="image_transport" type="republish" name="republish_rgb"
+        args="compressed in:=camera/color/image_raw raw out:=decompressed/camera/color/image_raw" />
+
+  <node pkg="image_transport" type="republish" name="republish_depth" 
+        args="compressedDepth in:=camera/depth/image_rect_raw raw out:=decompressed/camera/depth/image_rect_raw" />
+
+  <node pkg="riberry_startup" type="visual_pose_estimator_node.py" name="visual_pose_estimator" output="screen">
+    <param name="visualize" value="$(arg visualize)" />
+  </node>
+
+</launch>

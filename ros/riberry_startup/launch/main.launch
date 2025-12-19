@@ -1,0 +1,28 @@
+<launch>
+  <arg name="namespace" default="" />
+  <arg name="task_config_path" value="$(find riberry_startup)/config/task_config.json" />
+
+  <node pkg="riberry_startup" type="corner_teaching.py" name="corner_teaching" output="screen"
+        args="--namespace $(arg namespace)">
+    <param name="task_config_path" value="$(arg task_config_path)" />
+  </node>
+
+
+  <group if="$(eval arg('namespace') != '')" ns="$(arg namespace)">
+    <include file="$(find riberry_startup)/launch/visual_pose_estimator.launch" />
+
+    <node pkg="riberry_startup" type="task_parser_node.py" name="task_parser" output="screen">
+      <param name="task_config_path" value="$(arg task_config_path)" />
+    </node>
+  </group>
+
+
+  <group unless="$(eval arg('namespace') != '')">
+    <include file="$(find riberry_startup)/launch/visual_pose_estimator.launch" />
+
+    <node pkg="riberry_startup" type="task_parser_node.py" name="task_parser" output="screen">
+      <param name="task_config_path" value="$(arg task_config_path)" />
+    </node>
+  </group>
+
+</launch>

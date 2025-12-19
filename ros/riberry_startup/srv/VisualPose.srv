@@ -1,0 +1,9 @@
+# Request
+string prompt
+string mode       # "center", "corners" など (デフォルトは "center")
+string strategy   # "segmentation", "detection" (デフォルトは "segmentation")
+---
+# Response
+bool success
+string message
+geometry_msgs/Pose[] poses  # 複数の座標を返せるように配列に変更

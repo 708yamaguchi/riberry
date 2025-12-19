@@ -1,0 +1,35 @@
+<launch>
+  <arg name="arm_name" />
+
+  <!-- Save rosbag with name "rosbag_yyyy-MM-dd-HH-mm-ss" -->
+  <node pkg="rosbag" type="record" name="rosbag_record_node" output="screen"
+        args="record -o $(find riberry_startup)/rosbag/rosbag
+              /tf
+              /tf_static
+              /joint_states
+              /scan
+              /odom
+              /cmd_vel
+              /map
+              /initialpose
+              /amcl_pose
+              /diagnostics
+              
+              /$(arg arm_name)/joint_states
+              /$(arg arm_name)/servo_states
+              /$(arg arm_name)/imu
+              /$(arg arm_name)/battery/remaining_battery
+              /$(arg arm_name)/fullbody_controller/pressure/38
+              /$(arg arm_name)/fullbody_controller/pressure/39
+              /$(arg arm_name)/fullbody_controller/pressure/40
+              /$(arg arm_name)/fullbody_controller/state
+              /$(arg arm_name)/camera/color/image_raw/compressed
+              /$(arg arm_name)/camera/depth/image_rect_raw/compressedDepth
+              
+              /larm_controller/state
+              /rarm_controller/state
+              /elv_controller/state
+              /rhand/color/image_raw/compressed
+              /rhand/aligned_depth_to_color/image_raw/compressedDepth
+              " />
+</launch>
