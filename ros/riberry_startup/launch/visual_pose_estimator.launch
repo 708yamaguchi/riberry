@@ -7,7 +7,7 @@
   <node pkg="image_transport" type="republish" name="republish_depth" 
         args="compressedDepth in:=/camera/aligned_depth_to_color/image_raw raw out:=/decompressed/camera/aligned_depth_to_color/image_raw" />
 
-  <node pkg="riberry_startup" type="visual_pose_estimator.py" name="pose_estimator" output="screen">
+  <node pkg="riberry_startup" type="visual_pose_estimator_node.py" name="visual_pose_estimator" output="screen">
     <param name="visualize" value="(arg visualize)" />
   </node>
 
