@@ -6,11 +6,13 @@ import time
 import sys
 import numpy as np
 import rospy
+from std_msgs.msg import String, Int32
 
 from skrobot.model import RobotModel
 from skrobot.coordinates import Coordinates
 from skrobot.coordinates.math import midrot
 
+# KXRインターフェース
 from kxr_controller.check_ros_master import is_ros_master_local
 from kxr_controller.kxr_interface import KXRROSRobotInterface
 
@@ -19,12 +21,25 @@ class CleaningTask(object):
     def __init__(self, ri, robot_model, target_link_name):
         self.ri = ri
         self.robot_model = robot_model
+        
+        # --- ROS Control / Display用の変数 ---
+        self.atom_mode = ""
+        self.current_button_state = 0 
+        
+        # Atom S3への表示用Publisher
+        self.pub_display = rospy.Publisher("/atom_s3_additional_info", String, queue_size=1)
 
-        self.corners = []      # 教示した4隅の座標 (Coordinates)
-        self.corner_avs = []   # 教示した4隅の関節角度 (numpy array)
-        self.av_seq = []       # 計算済みの関節角度列
-        self.times = []        # 移動時間のリスト
+        # ROSトピックの購読
+        rospy.Subscriber("/atom_s3_mode", String, self._cb_atom_mode)
+        rospy.Subscriber("/atom_s3_button_state", Int32, self._cb_atom_button)
 
+        # 保存用変数の初期化
+        self.corners = []      
+        self.corner_avs = []   
+        self.av_seq = []       
+        self.times = []        
+
+        # リンク取得ロジック
         if hasattr(self.robot_model, target_link_name):
             self.target_coords = getattr(self.robot_model, target_link_name)
         else:
@@ -40,247 +55,240 @@ class CleaningTask(object):
         self.link_list = []
         link = self.target_coords.parent
         while link:
-            if link == self.robot_model:
-                break
+            if link == self.robot_model: break
             if hasattr(link, 'joint') and link.joint:
                 self.link_list.append(link)
             link = link.parent
         self.link_list.reverse()
+        rospy.loginfo(f"Target Link: {self.target_coords.name}")
 
-        print(f"Target Link: {self.target_coords.name}")
+    # --- ディスプレイ更新用メソッド ---
+    def update_display(self, text):
+        """
+        Atom S3のディスプレイにメッセージを送る
+        読みやすさのため、最初に改行を入れる。
+        """
+        self.pub_display.publish('\n' + text)
+
+    # --- コールバック関数 ---
+    def _cb_atom_mode(self, msg):
+        self.atom_mode = msg.data
+
+    def _cb_atom_button(self, msg):
+        # トピックの値をそのまま保存
+        self.current_button_state = msg.data
+
+    # --- ボタン入力待機関数 (シンプル版) ---
+    def wait_for_button_press(self, valid_buttons=[1, 2, 3]):
+        """
+        指定されたボタン値が来るまでループで待つ。
+        離されるのを待つ処理（リリース待ち）は行わない。
+        """
+        # ループ前に一度リセットして、古い入力を拾わないようにする
+        self.current_button_state = 0
+        
+        while not rospy.is_shutdown():
+            # 1. モードチェック
+            if self.atom_mode == "DisplayInformationMode":
+                
+                # 2. ボタン値チェック
+                btn = self.current_button_state
+                
+                if btn in valid_buttons:
+                    rospy.loginfo(f"Button {btn} accepted.")
+                    # 入力を一度受け取ったらリセットしてループを抜ける
+                    self.current_button_state = 0 
+                    return btn
+            
+            # CPU負荷軽減
+            time.sleep(0.05)
+        
+        return None
 
     def teach_corners(self):
-        """
-        4隅を教示する関数 (関節角度も保存するように変更)
-        """
-        self.corners = []
+        self.corners = [] 
         self.corner_avs = []
-
-        print("\n=== Teaching Phase ===")
-        print(f"Targeting: {self.target_coords.name}")
-        print("Order: Top-Left -> Top-Right -> Bottom-Right -> Bottom-Left")
-
-        print("Turning Servo OFF for teaching...")
+        
+        # 教示モード開始：サーボOFFにする
+        rospy.loginfo("Start Teaching: Servo OFF")
         self.ri.servo_off()
-        time.sleep(1.0)
-
+        
         for i in range(4):
-            input(f"Move to Corner {i+1} and press Enter...")
+            # 画面表示更新
+            # コーナー番号と、決定ボタン(1)を案内
+            msg = f"Pos {i+1}/4\n1:Set"
+            self.update_display(msg)
+            
+            rospy.loginfo(f"Waiting for Corner {i+1} (Button 1)...")
+            
+            # ボタン1が来るのを待つ
+            btn = self.wait_for_button_press(valid_buttons=[1])
+            if btn is None: return # shutdown時
 
-            # 現在の実機の角度を取得
+            # 座標取得
             current_av = self.ri.angle_vector()
-
-            # モデルに反映して座標を取得
             self.robot_model.angle_vector(current_av)
             coord = self.target_coords.copy_worldcoords()
-
-            # 座標と関節角度の両方を保存
+            
             self.corners.append(coord)
             self.corner_avs.append(current_av)
+            rospy.loginfo(f"Captured Corner {i+1}")
 
-            print(f"Captured Corner {i+1}: {coord.worldpos()}")
-
-        print("Teaching finished. Turning Servo ON.")
+        # 教示完了
+        self.update_display("Done\nWait")
+        rospy.loginfo("Teaching finished. Servo ON.")
         self.ri.servo_on()
         time.sleep(1.0)
-
+        
         self.ri.angle_vector(self.robot_model.angle_vector())
         self.ri.wait_interpolation()
 
         self.compute_plan()
 
-    def generate_zigzag_trajectory(self, corners, corner_avs, step_width=0.05):
-        """
-        4隅の座標と角度からジグザグ軌道（WaypointsとSeed角度）を生成する
-        """
-        # 座標の取り出し
+    def generate_zigzag_trajectory(self, corners, corner_avs, step_width=0.01):
         p1, p2 = corners[0].worldpos(), corners[1].worldpos()
         p3, p4 = corners[2].worldpos(), corners[3].worldpos()
-
-        # 回転行列の取り出し
         r1, r2 = corners[0].worldrot(), corners[1].worldrot()
         r3, r4 = corners[2].worldrot(), corners[3].worldrot()
-
-        # 関節角度(Seed用)の取り出し
         av1, av2 = corner_avs[0], corner_avs[1]
         av3, av4 = corner_avs[2], corner_avs[3]
-
+        
         vec_advance = p4 - p1
         len_advance = np.linalg.norm(vec_advance)
-
+        
         n_steps = int(len_advance / step_width)
         if n_steps < 1: n_steps = 1
+        
+        rospy.loginfo(f"Generating trajectory: {n_steps} steps")
 
         waypoints = []
-        seed_avs = [] # IKの初期値リスト
-
-        print(f"Generating trajectory with {n_steps} lines...")
-
+        seed_avs = []
+        
         for i in range(n_steps + 1):
-            ratio_adv = float(i) / n_steps # 進行方向(縦)の割合 0.0 -> 1.0
-
-            # --- 1. 左端と右端の「座標」を補間 ---
+            ratio_adv = float(i) / n_steps
             left_point = p1 + (p4 - p1) * ratio_adv
             right_point = p2 + (p3 - p2) * ratio_adv
-
-            # --- 2. 左端と右端の「回転」を補間 (midrot使用) ---
-            # 左列の回転: r1 -> r4
             left_rot = midrot(ratio_adv, r1, r4)
-            # 右列の回転: r2 -> r3
             right_rot = midrot(ratio_adv, r2, r3)
-
-            # --- 3. 左端と右端の「関節角度」を線形補間 ---
             left_av = av1 + (av4 - av1) * ratio_adv
             right_av = av2 + (av3 - av2) * ratio_adv
-
-            # 往復動作の作成
-            if i % 2 == 0: # 偶数行: 左 -> 右
-                # Start (Left)
+            
+            if i % 2 == 0:
                 waypoints.append(Coordinates(pos=left_point, rot=left_rot))
                 seed_avs.append(left_av)
-
-                # End (Right)
                 waypoints.append(Coordinates(pos=right_point, rot=right_rot))
                 seed_avs.append(right_av)
-            else: # 奇数行: 右 -> 左
-                # Start (Right)
+            else:
                 waypoints.append(Coordinates(pos=right_point, rot=right_rot))
                 seed_avs.append(right_av)
-
-                # End (Left)
                 waypoints.append(Coordinates(pos=left_point, rot=left_rot))
                 seed_avs.append(left_av)
-
         return waypoints, seed_avs
 
     def solve_full_ik(self, waypoints, seed_avs):
-        """
-        ウェイポイント列に対して、指定されたSeed角度を使ってIKを解く
-        """
-        print(f"Solving IK for {len(waypoints)} points...")
-        av_sequence = []
-        error_tolerance = 0.02
+        rospy.loginfo("Solving IK...")
+        self.update_display("Plan\nWait")
 
+        av_sequence = []
+        error_tolerance = 0.02 
+        
         for idx, wp in enumerate(waypoints):
-            # IKを解く前に、教示点から補間した「理想的な姿勢」をロボットモデルにセットする
             target_seed = seed_avs[idx]
             self.robot_model.angle_vector(target_seed)
-
-            # IK実行 (move_target等はinitで設定済みと仮定)
+            
             result = self.robot_model.inverse_kinematics(
                 target_coords=wp,
-                link_list=self.link_list,
+                link_list=self.link_list,     
                 move_target=self.target_coords,
-                rotation_axis=True,
-                stop=50, # シードが良いので計算回数は少なめで済むはず
-                revert_if_fail=False
+                rotation_axis=True,           
+                stop=50,                     
+                revert_if_fail=False          
             )
-
+            
             dist_err = np.linalg.norm(self.target_coords.worldpos() - wp.worldpos())
             is_success = (result is not False) and (result is not None)
 
             if is_success:
                 av_sequence.append(self.robot_model.angle_vector())
             else:
-                # 失敗時も誤差許容範囲内なら採用（またはSeedをそのまま採用する手もある）
                 if dist_err < error_tolerance:
-                    print(f"  Point {idx}: IK loose fit (Err: {dist_err*1000:.1f}mm)")
                     av_sequence.append(self.robot_model.angle_vector())
                 else:
-                    print(f"  Point {idx}: IK Failed. Error: {dist_err*1000:.1f}mm")
+                    rospy.logwarn(f"Point {idx}: IK Failed. Error: {dist_err*1000:.1f}mm")
                     return None
-
-        print("IK Solved successfully.")
+            
+        rospy.loginfo("IK Solved successfully.")
         return av_sequence
 
     def compute_plan(self):
-        """
-        教示データをもとに軌道とIKを計算して保存する
-        """
         if len(self.corners) != 4:
-            print("[Error] No corners taught yet. Please Teach first.")
+            rospy.logwarn("No corners taught yet.")
             return
 
-        print("Planning trajectory...")
-
-        # 1. 軌道生成
         waypoints, seed_avs = self.generate_zigzag_trajectory(
-            self.corners,
-            self.corner_avs,
+            self.corners, 
+            self.corner_avs, 
             step_width=0.01
         )
-
-        # 2. IK計算 (Seedを渡します)
+        
         seq = self.solve_full_ik(waypoints, seed_avs)
-
+        
         if seq is None:
-            print("[Failed] Planning failed due to IK.")
+            rospy.logerr("Planning failed.")
+            self.update_display("IK Fail\n1:Retry")
             self.av_seq = []
             return
 
         self.av_seq = seq
         self.times = [1.0] * len(self.av_seq)
-        print(f"[Success] Plan ready with {len(self.av_seq)} steps.")
+        rospy.loginfo("Plan ready.")
 
     def execute_motion(self):
-        """
-        計算済みの軌道を実行する
-        """
         if not self.av_seq:
-            print("[Error] No plan available. Teach and Plan first.")
+            rospy.logwarn("No plan available.")
+            self.update_display("NoPlan\n1:Teach")
+            time.sleep(2.0)
             return
-
-        print("Executing motion...")
+        
+        rospy.loginfo("Executing motion...")
+        self.update_display("Playing\n...")
+        
+        self.ri.servo_on()
         self.ri.angle_vector_sequence(self.av_seq, times=self.times)
         self.ri.wait_interpolation()
-        print("Motion Finished.")
+        rospy.loginfo("Motion Finished.")
 
-    def interactive_run(self):
+    def run(self):
         """
         メインループ
         """
-        while True:
-            print("\n" + "="*40)
-            print(" [t] Teach Corners (and plan)")
-            print(" [p] Play / Re-execute Motion")
-            print(" [s] Servo OFF (Manual Move)")
-            print(" [o] Servo ON (Hold Position)")
-            print(" [q] Quit")
-            print("="*40)
-
-            try:
-                if sys.version_info[0] < 3:
-                    cmd = raw_input("Command >> ").strip().lower()
-                else:
-                    cmd = input("Command >> ").strip().lower()
-            except EOFError:
-                break
-
-            if cmd == 'q':
-                print("Quitting...")
-                break
-
-            elif cmd == 't':
+        rospy.loginfo("Task Node Ready.")
+        
+        while not rospy.is_shutdown():
+            # メインメニュー表示
+            # 1: Teach, 2: Play, 3: Free
+            menu_msg = "1:Teach\n2:Play\n3:Free"
+            self.update_display(menu_msg)
+            
+            # ボタン入力を待つ (1, 2, 3 のいずれか)
+            btn = self.wait_for_button_press(valid_buttons=[1, 2, 3])
+            
+            if btn == 1:
+                # Teach Mode
                 self.teach_corners()
-
-            elif cmd == 'p':
+                
+            elif btn == 2:
+                # Play Mode
                 self.execute_motion()
-
-            elif cmd == 's':
-                print("Servo OFF.")
+                
+            elif btn == 3:
+                # Free Mode (Servo OFF)
+                rospy.loginfo("Servo OFF (Free Mode)")
+                self.update_display("Free\nMode")
                 self.ri.servo_off()
-
-            elif cmd == 'o':
-                print("Servo ON.")
-                self.ri.servo_on()
-                # 念のため現在角度で保持
-                self.ri.angle_vector(self.ri.angle_vector())
-                self.ri.wait_interpolation()
-
-            elif cmd == '':
-                continue
-            else:
-                print("Unknown command.")
+                # ユーザーが次のアクションを起こすまでこの状態で待つ
+                # ここでは単純に3秒待ってメニューに戻る（メニューに戻っても入力待機中はFreeのまま）
+                time.sleep(3.0)
 
 
 def main():
@@ -290,7 +298,6 @@ def main():
 
     rospy.init_node("kxr_cleaning_task", anonymous=True)
 
-    # RobotModelロード
     if is_ros_master_local() is True:
         robot_description = args.namespace + "/robot_description"
     else:
@@ -303,20 +310,16 @@ def main():
     with no_mesh_load_mode():
         robot_model.load_urdf_from_robot_description(robot_description)
 
-    # Interface準備
     ri = KXRROSRobotInterface(
         robot_model, namespace=args.namespace, controller_timeout=60.0
     )
 
     try:
-        # クラス初期化
         task = CleaningTask(ri, robot_model, target_link_name='module5_base_link')
-
-        # インタラクティブループ開始
-        task.interactive_run()
-
+        task.run()
+        
     except Exception as e:
-        print(f"[Error] {e}")
+        rospy.logerr(f"Error: {e}")
         import traceback
         traceback.print_exc()
 
