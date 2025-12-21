@@ -1,7 +1,8 @@
 # Request
 string prompt
+string mode       # "center", "corners" など (デフォルトは "center")
 ---
 # Response
 bool success
 string message
-geometry_msgs/Pose pose
+geometry_msgs/Pose[] poses  # 複数の座標を返せるように配列に変更
