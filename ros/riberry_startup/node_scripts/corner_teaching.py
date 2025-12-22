@@ -11,7 +11,7 @@ from std_msgs.msg import String, Int32
 from geometry_msgs.msg import Pose
 
 from skrobot.model import RobotModel
-from skrobot.coordinates import Coordinates
+from skrobot.coordinates import Coordinates, make_cascoords
 from skrobot.coordinates.math import interpolate_rotation_matrices, quaternion2matrix
 
 from kxr_controller.check_ros_master import is_ros_master_local
@@ -25,7 +25,7 @@ except ImportError:
 
 
 class CleaningTask(object):
-    def __init__(self, ri, robot_model, target_link_name):
+    def __init__(self, ri, robot_model):
         self.ri = ri
         self.robot_model = robot_model
 
@@ -58,26 +58,43 @@ class CleaningTask(object):
         self.vision_area_margin = 0.00
 
         # --- リンク設定 ---
-        self._setup_kinematics(target_link_name)
+        self._setup_kinematics()
 
-    def _setup_kinematics(self, target_link_name):
-        """対象リンクの取得とIK用リンクチェーンの生成"""
+    def _setup_kinematics(self):
+        """ハードコードされたリンクを用いて手先座標系とIKチェーンを設定"""
+        
+        # 1. 物理リンク名のハードコード
+        target_link_name = 'module5_base_link'
+        
+        # 2. 物理リンクオブジェクトの取得
         if hasattr(self.robot_model, target_link_name):
-            self.target_coords = getattr(self.robot_model, target_link_name)
+            physical_link = getattr(self.robot_model, target_link_name)
         else:
+            # 属性としてアクセスできない場合の検索
             found = next((l for l in self.robot_model.link_list if l.name == target_link_name), None)
             if not found:
                 raise ValueError(f"Link '{target_link_name}' not found.")
-            self.target_coords = found
+            physical_link = found
 
+        # 3. 手先座標系 (self.end_coords) の作成
+        # make_cascoordsを使って、物理リンクを親とする座標系を作成
+        self.end_coords = make_cascoords(parent=physical_link)
+        
+        # 指定した物理リンクのローカル座標系(wrt='local')でエンドエフェクタ位置を指定
+        ee_offset = (0.0, 0.0, 0.085)
+        self.end_coords.translate(ee_offset, wrt="local")
+
+        # 4. IK計算用のリンクチェーン生成
         self.link_list = []
-        link = self.target_coords.parent
+        link = physical_link.parent
         while link and link != self.robot_model:
             if hasattr(link, 'joint') and link.joint:
                 self.link_list.append(link)
             link = link.parent
         self.link_list.reverse()
-        rospy.loginfo(f"Target Link: {self.target_coords.name}")
+
+        rospy.loginfo(f"Target Physical Link: {physical_link.name}")
+        rospy.loginfo(f"End Effector set with local offset {ee_offset}")
 
     # --- ディスプレイ更新 ---
     def update_display(self, text):
@@ -136,13 +153,13 @@ class CleaningTask(object):
         result = self.robot_model.inverse_kinematics(
             target_coords=target_coords,
             link_list=self.link_list,
-            move_target=self.target_coords,
+            move_target=self.end_coords,
             rotation_axis=True,
             stop=50,
             revert_if_fail=False
         )
 
-        dist_err = np.linalg.norm(self.target_coords.worldpos() - target_coords.worldpos())
+        dist_err = np.linalg.norm(self.end_coords.worldpos() - target_coords.worldpos())
         is_success = (result is not False) and (result is not None)
 
         if is_success:
@@ -182,20 +199,19 @@ class CleaningTask(object):
             self.update_display(f"Manual {i+1}/4\n1:Set")
             rospy.loginfo(f"Waiting for Corner {i+1}...")
 
-            if self.wait_for_button_press(valid_buttons=[1]) is None: return
+            if self.wait_for_button_press(valid_buttons=[1]) is None:
+                return
 
             current_av = self.ri.angle_vector()
             self.robot_model.angle_vector(current_av)
 
             # マニュアル時は現在値をそのまま使う（オフセットなし）
-            temp_corners.append(self.target_coords.copy_worldcoords())
+            temp_corners.append(self.end_coords.copy_worldcoords())
             temp_avs.append(current_av)
             rospy.loginfo(f"Captured Corner {i+1}")
 
         self.update_display("Manual Done\nWait")
         rospy.loginfo("Manual Teaching finished. Keeping Servo OFF.")
-
-        # ※ここではServo ONしない
 
         self.set_corners_and_plan(temp_corners, temp_avs)
 
@@ -238,7 +254,7 @@ class CleaningTask(object):
         # 認識時の姿勢（回転）を基準にするため保存
         seed_av = self.ri.angle_vector()
         self.robot_model.angle_vector(seed_av)
-        base_rot = self.target_coords.worldrot()
+        base_rot = self.end_coords.worldrot()
 
         try:
             res = vision_srv(req)
@@ -378,7 +394,7 @@ class CleaningTask(object):
         for i, (wp, seed) in enumerate(zip(waypoints, seed_avs)):
             av = self._solve_ik(wp, seed)
             if av is None:
-                dist = np.linalg.norm(self.target_coords.worldpos() - wp.worldpos())
+                dist = np.linalg.norm(self.end_coords.worldpos() - wp.worldpos())
                 rospy.logwarn(f"Point {i}: IK Failed. Error: {dist*1000:.1f}mm")
                 return None
             av_sequence.append(av)
@@ -399,8 +415,11 @@ class CleaningTask(object):
 
         rospy.loginfo("Executing motion...")
         self.update_display("Playing\n...")
-
         self.ri.servo_on()
+        rospy.loginfo("Moving to trajectory start (3.0s)...")
+        self.ri.angle_vector(self.av_seq[0], 3.0)
+        self.ri.wait_interpolation()
+
         # 動作再生
         self.ri.angle_vector_sequence(self.av_seq, times=self.times)
         self.ri.wait_interpolation()
@@ -451,9 +470,7 @@ def main():
     ri = KXRROSRobotInterface(robot_model, namespace=args.namespace, controller_timeout=60.0)
 
     try:
-        # TODO: エンドエフェクタ用のターゲットを指定する。そもそも、target_coordsはこの関数で指定する必要がない気がする（？）
-        # task = CleaningTask(ri, robot_model, target_link_name='module5_base_link')
-        task = CleaningTask(ri, robot_model, target_link_name='module5_gripper_link2')
+        task = CleaningTask(ri, robot_model)
         task.run()
     except Exception as e:
         rospy.logerr(f"Fatal Error: {e}")
