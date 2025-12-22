@@ -112,10 +112,9 @@ class VisualPoseEstimator:
         self.debug_pub = rospy.Publisher("~debug_image", Image, queue_size=1)
 
         # --- Services ---
-        # ★変更点: サービス名を calculate_offset から estimate_cleaning_zone に変更
-        rospy.Service("estimate_cleaning_zone", VisualPose, self.handle_get_position)
+        rospy.Service("estimate_corners", VisualPose, self.handle_get_position)
 
-        rospy.loginfo("Visual Pose Estimator (Cleaning Zone) is READY.")
+        rospy.loginfo("Visual Pose Estimator is READY.")
 
     def info_cb(self, msg):
         if self.camera_info_K is None:
