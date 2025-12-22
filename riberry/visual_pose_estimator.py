@@ -1,3 +1,4 @@
+import time
 import rospy
 import cv2
 import numpy as np
@@ -126,10 +127,28 @@ class VisualPoseEstimator:
             except Exception as e:
                 rospy.logerr(f"Image conversion error: {e}")
 
-    def capture_snapshot(self):
+    def capture_snapshot(self, timeout=3.0):
+        # 1. 古いキャッシュを破棄する (これにより、次のコールバックが来るまでNoneになる)
         with self.lock:
-            if self.latest_color is not None and self.latest_depth is not None:
-                return self.latest_color.copy(), self.latest_depth.copy()
+            self.latest_color = None
+            self.latest_depth = None
+
+        # 2. 新しい画像が来るのを待つ
+        start_time = time.time()
+        rate = rospy.Rate(10) # 10Hzでチェック
+
+        while (time.time() - start_time) < timeout:
+            with self.lock:
+                # 画像がセットされたか確認
+                if self.latest_color is not None and self.latest_depth is not None:
+                    # 確実にコピーして返す
+                    return self.latest_color.copy(), self.latest_depth.copy()
+            
+            # まだ来てなければ待つ（ロックを開放してからsleepすることが重要）
+            rate.sleep()
+
+        # 3. タイムアウトした場合
+        rospy.logerr("Capture timed out: No new image received.")
         return None, None
 
     # =========================================================================

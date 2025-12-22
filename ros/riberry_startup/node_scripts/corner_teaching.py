@@ -58,7 +58,9 @@ class CleaningTask(object):
         
         # IKターゲットのオフセット設定 [x, y, z]（ロボットのベース座標系）
         # たわみ補正のため、デフォルトでZ方向に+5cm履かせる
-        self.ik_target_offset = np.array([0.0, 0.0, 0.05])
+        self.ik_target_offset = np.array([0.0, 0.0, 0.12])
+        # IKでrevert_if_fail=Falseのときに許容する手先誤差
+        self.error_tolerance = 0.02
 
         # リンク取得ロジック
         if hasattr(self.robot_model, target_link_name):
@@ -261,7 +263,7 @@ class CleaningTask(object):
 
             # Base座標系での位置を取得
             world_pos = converted_coord.worldpos()
-            # rospy.loginfo(f"Debug [Corner {i+1}]: Target World Pos (Base Frame) = {world_pos}")
+            rospy.loginfo(f"Debug [Corner {i+1}]: Target World Pos (Base Frame) = {world_pos}")
 
             # 2. 姿勢 (Rotation) は「認識した瞬間の手先姿勢 (current_rot)」を使う
             target_coord = Coordinates(pos=world_pos, rot=current_rot)
@@ -269,7 +271,7 @@ class CleaningTask(object):
 
             # 3. IKを解く
             self.robot_model.angle_vector(current_av_seed)
-            ik_result = self.robot_model.inverse_kinematics(
+            result = self.robot_model.inverse_kinematics(
                 target_coords=target_coord,
                 link_list=self.link_list,
                 move_target=self.target_coords,
@@ -277,12 +279,18 @@ class CleaningTask(object):
                 stop=50,
                 revert_if_fail=False
             )
-            if ik_result is False:
-                rospy.logerr(f"IK Failed for Vision Corner {i+1}")
-                self.update_display(f"IK Fail\nCorner{i+1}")
-                return
-
-            temp_avs.append(self.robot_model.angle_vector())
+            dist_err = np.linalg.norm(self.target_coords.worldpos() - target_coord.worldpos())
+            is_success = (result is not False) and (result is not None)
+            if is_success:
+                temp_avs.append(self.robot_model.angle_vector())
+            else:
+                if dist_err < self.error_tolerance:
+                    temp_avs.append(self.robot_model.angle_vector())
+                else:
+                    self.update_display(f"IK Fail\nCorner{i+1}")
+                    rospy.logerr(f"IK Failed for Vision Corner {i+1}")
+                    rospy.logerr(f"Point {idx}: IK Failed. Error: {dist_err*1000:.1f}mm")
+                    return None
 
         rospy.loginfo("All vision corners processed.")
         self.update_display("Vision Done\nWait")
@@ -366,7 +374,6 @@ class CleaningTask(object):
         self.update_display("Plan\nWait")
 
         av_sequence = []
-        error_tolerance = 0.02
 
         for idx, wp in enumerate(waypoints):
             target_seed = seed_avs[idx]
@@ -387,7 +394,7 @@ class CleaningTask(object):
             if is_success:
                 av_sequence.append(self.robot_model.angle_vector())
             else:
-                if dist_err < error_tolerance:
+                if dist_err < self.error_tolerance:
                     av_sequence.append(self.robot_model.angle_vector())
                 else:
                     rospy.logwarn(f"Point {idx}: IK Failed. Error: {dist_err*1000:.1f}mm")
