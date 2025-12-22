@@ -53,9 +53,9 @@ class CleaningTask(object):
 
         # [Vision Mode Only] 画像認識時のみ使用するパラメータ
         # たわみ補正等のためのZ方向オフセット [m] (Visionモードのみ適用)
-        self.vision_target_offset = np.array([0.0, 0.0, 0.03])
+        self.vision_target_offset = np.array([0.0, 0.0, -0.02])
         # 認識領域の拡大・縮小マージン [m] (プラスで拡大、マイナスで縮小)
-        self.vision_area_margin = 0.00
+        self.vision_area_margin = 0.05
 
         # --- リンク設定 ---
         self._setup_kinematics()
@@ -246,8 +246,11 @@ class CleaningTask(object):
             self.update_display("Srv Timeout\nCheck ROS")
             return
 
+        # req = VisualPoseRequest(prompt="dirty area", mode="corners")
         # req = VisualPoseRequest(prompt="detect cleaning area", mode="corners")
-        req = VisualPoseRequest(prompt="Green tape area", mode="corners")
+        # req = VisualPoseRequest(prompt="Green tape area", mode="corners")
+        # req = VisualPoseRequest(prompt="Coffee powder", mode="corners")
+        req = VisualPoseRequest(prompt="Coffee stains", mode="corners")
         rospy.loginfo(f"Calling Vision Service... prompt={req.prompt}")
         self.update_display("Vision\nThinking...")
 

@@ -217,7 +217,7 @@ class VisualPoseEstimator:
         rospy.loginfo(f"Result [{mode}]: {pts_str}")
 
         # 5. 可視化
-        self.publish_debug_image(color, mask, points_3d, mode, self.last_approx_corners)
+        self.publish_debug_image(color, mask, points_3d, mode, self.last_approx_corners, prompt_text=target_prompt)
 
         return VisualPoseResponse(success=True, message=f"Found {len(points_3d)} points.", poses=pose_list)
 
@@ -289,15 +289,15 @@ class VisualPoseEstimator:
         # マスクの面積が、外接矩形の面積の何割を占めるか。
         # 長方形に近い物体(テーブル等)なら0.8~0.9以上になります。
         # 0.6未満などは、L字型や複雑な凹凸形状である可能性が高く、単純な長方形スイープ動作には不向きです。
-        rectangularity = contour_area / box_area
-        if rectangularity < 0.6:  # 閾値は環境に合わせて調整 (0.6 ~ 0.7 推奨)
-            return None, None, f"Shape not rectangular enough ({rectangularity:.2f})"
+        # rectangularity = contour_area / box_area
+        # if rectangularity < 0.6:  # 閾値は環境に合わせて調整 (0.6 ~ 0.7 推奨)
+        #     return None, None, f"Shape not rectangular enough ({rectangularity:.2f})"
 
         # C. 最小サイズチェック
         # 短辺が極端に短い（細長い棒など）場合は除外
-        min_side = min(w, h)
-        if min_side < 20: # ピクセル単位。状況に応じて調整してください
-             return None, None, "Object too thin"
+        # min_side = min(w, h)
+        # if min_side < 20: # ピクセル単位。状況に応じて調整してください
+        #      return None, None, "Object too thin"
 
         # 3. 4点の画像座標を取得
         box_points = cv2.boxPoints(rect)
@@ -342,7 +342,7 @@ class VisualPoseEstimator:
     # =========================================================================
     # Visualization
     # =========================================================================
-    def publish_debug_image(self, color, mask, points_3d, mode, approx_poly=None):
+    def publish_debug_image(self, color, mask, points_3d, mode, approx_poly=None, prompt_text=""):
         if not self.visualize:
             return
 
@@ -352,6 +352,10 @@ class VisualPoseEstimator:
         colored_mask = np.zeros_like(vis_img)
         colored_mask[mask > 0] = [0, 255, 0]
         vis_img = cv2.addWeighted(vis_img, 0.7, colored_mask, 0.3, 0)
+
+        text_str = f"Prompt: {prompt_text}"
+        cv2.putText(vis_img, text_str, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 3) # 縁取り(黒)
+        cv2.putText(vis_img, text_str, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2) # 本体(黄色)
 
         if mode == "center" and points_3d:
              M = cv2.moments(mask)
