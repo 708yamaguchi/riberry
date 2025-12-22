@@ -55,6 +55,10 @@ class CleaningTask(object):
         self.corner_avs = []
         self.av_seq = []
         self.times = []
+        
+        # IKターゲットのオフセット設定 [x, y, z]（ロボットのベース座標系）
+        # たわみ補正のため、デフォルトでZ方向に+5cm履かせる
+        self.ik_target_offset = np.array([0.0, 0.0, 0.05])
 
         # リンク取得ロジック
         if hasattr(self.robot_model, target_link_name):
@@ -203,16 +207,8 @@ class CleaningTask(object):
             self.update_display("Err:NoSrv\nCheckCode")
             return
 
-        rospy.loginfo("Vision Mode: Servo ON. Starting countdown.")
-        self.ri.servo_on()
-        # 3秒カウントダウン (3 -> 2 -> 1)
-        for i in range(3, 0, -1):
-            msg = f"Vision\n{i}..."
-            self.update_display(msg)
-            rospy.loginfo(f"Countdown: {i}")
-            time.sleep(1.0)
         self.update_display("Vision\nCapture!")
-        rospy.loginfo("Capturing now...")
+        rospy.loginfo("Vision Capture!...")
 
         service_name = "/estimate_corners"
         rospy.loginfo(f"Waiting for service: {service_name}")
@@ -265,10 +261,7 @@ class CleaningTask(object):
 
             # Base座標系での位置を取得
             world_pos = converted_coord.worldpos()
-
-            # ---【要求仕様】デバッグ用出力 ---
-            rospy.loginfo(f"Debug [Corner {i+1}]: Target World Pos (Base Frame) = {world_pos}")
-            # ---------------------------
+            # rospy.loginfo(f"Debug [Corner {i+1}]: Target World Pos (Base Frame) = {world_pos}")
 
             # 2. 姿勢 (Rotation) は「認識した瞬間の手先姿勢 (current_rot)」を使う
             target_coord = Coordinates(pos=world_pos, rot=current_rot)
@@ -302,6 +295,8 @@ class CleaningTask(object):
     def set_corners_and_plan(self, corners, avs):
         self.corners = corners
         self.corner_avs = avs
+
+        rospy.logwarn(f"Applying IK Target Offset: {self.ik_target_offset}")
 
         if len(self.corners) != 4:
             rospy.logwarn("No corners taught yet.")
@@ -345,8 +340,10 @@ class CleaningTask(object):
 
         for i in range(n_steps + 1):
             ratio_adv = float(i) / n_steps
-            left_point = p1 + (p4 - p1) * ratio_adv
-            right_point = p2 + (p3 - p2) * ratio_adv
+            base_left = p1 + (p4 - p1) * ratio_adv
+            base_right = p2 + (p3 - p2) * ratio_adv
+            left_point = base_left + self.ik_target_offset
+            right_point = base_right + self.ik_target_offset
             left_rot = interpolate_rotation_matrices(ratio_adv, r1, r4)
             right_rot = interpolate_rotation_matrices(ratio_adv, r2, r3)
             left_av = av1 + (av4 - av1) * ratio_adv

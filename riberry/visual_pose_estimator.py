@@ -13,14 +13,12 @@ from sensor_msgs.msg import Image, CameraInfo
 from geometry_msgs.msg import Pose
 from riberry_startup.srv import VisualPose, VisualPoseResponse
 from cv_bridge import CvBridge
-
 # Sync
 from message_filters import ApproximateTimeSynchronizer, Subscriber
-
 # External Libraries
 from transformers import AutoProcessor, AutoModelForCausalLM
 
-# Florence2Segmenterクラスは変更なしのため省略 (そのまま使用してください)
+
 class Florence2Segmenter:
     def __init__(self):
         self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
@@ -174,7 +172,6 @@ class VisualPoseEstimator:
                 success = True
 
         elif mode == "corners":
-            # ★変更点: cornersモードの計算ロジックを刷新
             pts, approx_poly, msg = self.calculate_corners(mask, depth)
             if pts:
                 points_3d = pts
@@ -247,50 +244,81 @@ class VisualPoseEstimator:
 
     def calculate_corners(self, mask, depth_img):
         """
-        ★変更: 長方形近似ではなく、多角形近似(approxPolyDP)を使用。
-        4点（台形形状）のそれぞれの座標で深度を取得して3次元化する。
+        回転外接矩形(minAreaRect)を使用し、矩形らしさを判定。
+        「拭き掃除」に適した、矩形度が高い領域のみ4点を返す。
         """
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         if not contours:
             return None, None, "No contours found"
 
+        # 最大の領域を取得
         largest_contour = max(contours, key=cv2.contourArea)
+        contour_area = cv2.contourArea(largest_contour)
 
-        # 多角形近似 (周長の2%を誤差許容範囲とする)
-        epsilon = 0.02 * cv2.arcLength(largest_contour, True)
-        approx = cv2.approxPolyDP(largest_contour, epsilon, True)
-        # approx shape is (N, 1, 2)
+        # 1. 回転外接矩形を計算 (中心(x,y), (幅,高さ), 角度)
+        rect = cv2.minAreaRect(largest_contour)
+        (center, (w, h), angle) = rect
+        box_area = w * h
 
-        # 深度のフォールバック値（コーナーの深度が抜けている場合に使用）
+        # 2. 基準判定: 「掃除する価値がある矩形か？」
+        
+        # A. 面積ゼロ除算回避
+        if box_area <= 1e-5:
+            return None, None, "Area too small"
+
+        # B. 矩形度 (Rectangularity) チェック
+        # マスクの面積が、外接矩形の面積の何割を占めるか。
+        # 長方形に近い物体(テーブル等)なら0.8~0.9以上になります。
+        # 0.6未満などは、L字型や複雑な凹凸形状である可能性が高く、単純な長方形スイープ動作には不向きです。
+        rectangularity = contour_area / box_area
+        if rectangularity < 0.6:  # 閾値は環境に合わせて調整 (0.6 ~ 0.7 推奨)
+            return None, None, f"Shape not rectangular enough ({rectangularity:.2f})"
+
+        # C. 最小サイズチェック
+        # 短辺が極端に短い（細長い棒など）場合は除外
+        min_side = min(w, h)
+        if min_side < 20: # ピクセル単位。状況に応じて調整してください
+             return None, None, "Object too thin"
+
+        # 3. 4点の画像座標を取得
+        box_points = cv2.boxPoints(rect)
+        box_points = np.int0(box_points) # [[x,y], [x,y], [x,y], [x,y]]
+
+        # 4. 3次元座標へ変換
+        # コーナーの深度が抜けている場合に備え、物体全体の深度中央値を計算
         fallback_z = self.get_representative_depth(mask, depth_img)
         if fallback_z is None: fallback_z = 0.0
 
         points_3d = []
         
-        # 検出された各頂点について処理
-        for point in approx:
-            u, v = point[0]
+        for point in box_points:
+            u, v = point
 
             # 画像外にはみ出さないようクリップ
             v_safe = int(np.clip(v, 0, depth_img.shape[0] - 1))
             u_safe = int(np.clip(u, 0, depth_img.shape[1] - 1))
 
-            # そのピクセルの深度を取得 (単位: mm と仮定 -> mへ)
+            # そのピクセルの深度を取得
             d_val = depth_img[v_safe, u_safe]
             z = d_val * 0.001
 
-            # 深度が無効(0)の場合は、物体全体の代表深度(median)を使う
-            if z <= 0.001:
+            # 外接矩形のコーナーは、実際の物体の外側（背景）にある可能性が高いため、
+            # 深度が急激に遠い、または0の場合は、物体の代表深度(fallback_z)で代用する処理を入れると安定します。
+            # ここでは簡易的に「0なら代用」としていますが、
+            # 「fallback_zとの差が大きすぎたら代用」とするとよりロバストです。
+            if z <= 0.001 or (fallback_z > 0 and abs(z - fallback_z) > 0.5):
                 z = fallback_z
 
             if z > 0:
                 pt_3d = self.project_pixel_to_3d(u, v, z)
                 points_3d.append(pt_3d)
             else:
-                # どうしても深度が取れない場合
+                # どうしても深度が決まらない場合
                 points_3d.append((0.0, 0.0, 0.0))
 
-        return points_3d, approx, "Success"
+        # box_pointsは描画用(approx_poly)としてもそのまま使えます
+        # points_3dは必ず4点になります
+        return points_3d, box_points, "Success"
 
     # =========================================================================
     # Visualization
@@ -314,12 +342,11 @@ class VisualPoseEstimator:
              cv2.putText(vis_img, text, (cx-60, cy-15), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 2)
 
         elif mode == "corners" and points_3d and approx_poly is not None:
-            # ★変更: 多角形を描画
             cv2.drawContours(vis_img, [approx_poly], -1, (0, 0, 255), 2)
-
             # 各頂点に3次元座標を表示
             for i, point in enumerate(approx_poly):
-                u, v = point[0]
+                # u, v = point[0]
+                u, v = point.flatten()
                 if i < len(points_3d):
                     x, y, z = points_3d[i]
                     
