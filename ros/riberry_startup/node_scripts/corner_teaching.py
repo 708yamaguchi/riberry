@@ -53,9 +53,9 @@ class CleaningTask(object):
 
         # [Vision Mode Only] 画像認識時のみ使用するパラメータ
         # たわみ補正等のためのZ方向オフセット [m] (Visionモードのみ適用)
-        self.vision_target_offset = np.array([0.0, 0.0, 0.1])
+        self.vision_target_offset = np.array([0.0, 0.0, 0.03])
         # 認識領域の拡大・縮小マージン [m] (プラスで拡大、マイナスで縮小)
-        self.vision_area_margin = 0.02
+        self.vision_area_margin = 0.00
 
         # --- リンク設定 ---
         self._setup_kinematics(target_link_name)
@@ -208,8 +208,19 @@ class CleaningTask(object):
             self.update_display("Err:NoSrv\nCheckCode")
             return
 
+        # self.update_display("Vision\nCapture!")
+        # rospy.loginfo("Vision Capture!...")
+        rospy.loginfo("Vision Mode: Servo ON. Starting countdown.")
+        self.ri.servo_on()
+        # 3秒カウントダウン (3 -> 2 -> 1)
+        for i in range(3, 0, -1):
+            msg = f"Vision\n{i}..."
+            self.update_display(msg)
+            rospy.loginfo(f"Countdown: {i}")
+            time.sleep(1.0)
+        # 撮影タイミング表示
         self.update_display("Vision\nCapture!")
-        rospy.loginfo("Vision Capture!...")
+        rospy.loginfo("Capturing now...")
 
         try:
             rospy.wait_for_service("/estimate_corners", timeout=5.0)
@@ -219,7 +230,8 @@ class CleaningTask(object):
             self.update_display("Srv Timeout\nCheck ROS")
             return
 
-        req = VisualPoseRequest(prompt="detect cleaning area", mode="corners")
+        # req = VisualPoseRequest(prompt="detect cleaning area", mode="corners")
+        req = VisualPoseRequest(prompt="Green tape area", mode="corners")
         rospy.loginfo(f"Calling Vision Service... prompt={req.prompt}")
         self.update_display("Vision\nThinking...")
 
@@ -417,7 +429,7 @@ class CleaningTask(object):
                 rospy.loginfo("Servo OFF (Free Mode)")
                 self.update_display("Free\nMode")
                 self.ri.servo_off()
-                time.sleep(3.0)
+                time.sleep(1.0)
 
 def main():
     parser = argparse.ArgumentParser()
@@ -439,7 +451,9 @@ def main():
     ri = KXRROSRobotInterface(robot_model, namespace=args.namespace, controller_timeout=60.0)
 
     try:
-        task = CleaningTask(ri, robot_model, target_link_name='module5_base_link')
+        # TODO: エンドエフェクタ用のターゲットを指定する。そもそも、target_coordsはこの関数で指定する必要がない気がする（？）
+        # task = CleaningTask(ri, robot_model, target_link_name='module5_base_link')
+        task = CleaningTask(ri, robot_model, target_link_name='module5_gripper_link2')
         task.run()
     except Exception as e:
         rospy.logerr(f"Fatal Error: {e}")
