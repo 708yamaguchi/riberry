@@ -263,8 +263,8 @@ class VisualPoseEstimator:
 
     def calculate_corners(self, mask, depth_img):
         """
-        回転外接矩形(minAreaRect)を使用し、矩形らしさを判定。
-        「拭き掃除」に適した、矩形度が高い領域のみ4点を返す。
+        変更点: minAreaRect(長方形強制)をやめ、approxPolyDP(多角形近似)を使用して
+        パースのついた台形や一般四角形として頂点を取得する。
         """
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         if not contours:
@@ -272,39 +272,40 @@ class VisualPoseEstimator:
 
         # 最大の領域を取得
         largest_contour = max(contours, key=cv2.contourArea)
-        contour_area = cv2.contourArea(largest_contour)
-
-        # 1. 回転外接矩形を計算 (中心(x,y), (幅,高さ), 角度)
-        rect = cv2.minAreaRect(largest_contour)
-        (center, (w, h), angle) = rect
-        box_area = w * h
-
-        # 2. 基準判定: 「掃除する価値がある矩形か？」
         
-        # A. 面積ゼロ除算回避
-        if box_area <= 1e-5:
-            return None, None, "Area too small"
+        # --- 変更ここから ---
+        
+        # 1. 形状をきれいにするために凸包(Convex Hull)を取得
+        # これにより、凹みノイズを除去し、綺麗な多角形にしやすくします
+        hull = cv2.convexHull(largest_contour)
 
-        # B. 矩形度 (Rectangularity) チェック
-        # マスクの面積が、外接矩形の面積の何割を占めるか。
-        # 長方形に近い物体(テーブル等)なら0.8~0.9以上になります。
-        # 0.6未満などは、L字型や複雑な凹凸形状である可能性が高く、単純な長方形スイープ動作には不向きです。
-        # rectangularity = contour_area / box_area
-        # if rectangularity < 0.6:  # 閾値は環境に合わせて調整 (0.6 ~ 0.7 推奨)
-        #     return None, None, f"Shape not rectangular enough ({rectangularity:.2f})"
+        # 2. 多角形近似を行い、頂点が4つになるパラメータを探す
+        box_points = None
+        
+        # 許容誤差(epsilon)を少しずつ大きくしながら、ちょうど4点になる場所を探す
+        # 周長の1%から始めて、最大10%まで試行
+        for factor in np.linspace(0.01, 0.1, 10):
+            epsilon = factor * cv2.arcLength(hull, True)
+            approx = cv2.approxPolyDP(hull, epsilon, True)
+            
+            if len(approx) == 4:
+                # (N, 1, 2) -> (N, 2) に形状変換
+                box_points = approx.reshape(-1, 2)
+                break
+        
+        # もしうまく4点が見つからなかった場合(円形に近い、ノイズが多い等)のフォールバック
+        if box_points is None:
+            # 仕方がないので従来のminAreaRectを使う（あるいはエラーにする）
+            rect = cv2.minAreaRect(largest_contour)
+            box_points = np.int0(cv2.boxPoints(rect))
+        
+        # 頂点の順序を整列させる（オプション）
+        # 左上、右上、右下、左下 の順などに揃えたい場合はここでソート処理を入れると良いです
+        # 今回は検出順のまま進めます
 
-        # C. 最小サイズチェック
-        # 短辺が極端に短い（細長い棒など）場合は除外
-        # min_side = min(w, h)
-        # if min_side < 20: # ピクセル単位。状況に応じて調整してください
-        #      return None, None, "Object too thin"
+        # --- 変更ここまで ---
 
-        # 3. 4点の画像座標を取得
-        box_points = cv2.boxPoints(rect)
-        box_points = np.int0(box_points) # [[x,y], [x,y], [x,y], [x,y]]
-
-        # 4. 3次元座標へ変換
-        # コーナーの深度が抜けている場合に備え、物体全体の深度中央値を計算
+        # 4. 3次元座標へ変換 (以降は元のコードと同じですが、box_pointsを使います)
         fallback_z = self.get_representative_depth(mask, depth_img)
         if fallback_z is None: fallback_z = 0.0
 
@@ -317,14 +318,9 @@ class VisualPoseEstimator:
             v_safe = int(np.clip(v, 0, depth_img.shape[0] - 1))
             u_safe = int(np.clip(u, 0, depth_img.shape[1] - 1))
 
-            # そのピクセルの深度を取得
             d_val = depth_img[v_safe, u_safe]
             z = d_val * 0.001
 
-            # 外接矩形のコーナーは、実際の物体の外側（背景）にある可能性が高いため、
-            # 深度が急激に遠い、または0の場合は、物体の代表深度(fallback_z)で代用する処理を入れると安定します。
-            # ここでは簡易的に「0なら代用」としていますが、
-            # 「fallback_zとの差が大きすぎたら代用」とするとよりロバストです。
             if z <= 0.001 or (fallback_z > 0 and abs(z - fallback_z) > 0.5):
                 z = fallback_z
 
@@ -332,11 +328,10 @@ class VisualPoseEstimator:
                 pt_3d = self.project_pixel_to_3d(u, v, z)
                 points_3d.append(pt_3d)
             else:
-                # どうしても深度が決まらない場合
                 points_3d.append((0.0, 0.0, 0.0))
 
-        # box_pointsは描画用(approx_poly)としてもそのまま使えます
-        # points_3dは必ず4点になります
+        # 描画用に box_points を返す (approx_polyとして使用)
+        # box_points は numpy array なので、リスト構造などに直す必要はなくそのまま使えます
         return points_3d, box_points, "Success"
 
     # =========================================================================
