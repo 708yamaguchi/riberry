@@ -68,6 +68,100 @@ def generate_zigzag_trajectory(corners, corner_avs, step_width=0.02):
 
     return waypoints, seed_avs
 
+def generate_radial_gathering_trajectory(corners, corner_avs, step_width=0.04, sweep_ratio=1.0, lift_offset=(0, 0, 0.05)):
+    """
+    領域の外周（辺）から中心に向かって掃き寄せるような放射状の軌道を生成する。
+    戻る動作の際にアームを持ち上げて、次の開始点へ移動する。
+
+    Args:
+        corners (list[Coordinates]): コーナー4点の座標リスト
+        corner_avs (list[numpy.ndarray]): コーナー4点の関節角度リスト
+        step_width (float): 辺上の刻み幅 [m]
+        sweep_ratio (float): 中心への移動量の割合 (0.0~1.0)
+        lift_offset (tuple): 持ち上げ移動時のオフセット (x, y, z) [m]
+    """
+    p = [c.worldpos() for c in corners]
+    r = [c.worldrot() for c in corners]
+    av = corner_avs
+
+    # オフセットをnumpy配列化
+    lift_vec = np.array(lift_offset)
+
+    # 1. 領域の中心点を計算
+    center_pos = np.mean(p, axis=0)
+
+    waypoints = []
+    seed_avs = []
+
+    # 4つの辺を順に処理 (0->1, 1->2, 2->3, 3->0)
+    edges = [(0, 1), (1, 2), (2, 3), (3, 0)]
+
+    for (idx_start, idx_end) in edges:
+        p_start, p_end = p[idx_start], p[idx_end]
+        r_start, r_end = r[idx_start], r[idx_end]
+        av_start, av_end = av[idx_start], av[idx_end]
+
+        # 辺の長さを計算してステップ数を決定
+        edge_len = np.linalg.norm(p_end - p_start)
+        n_steps = max(1, int(edge_len / step_width))
+
+        for i in range(n_steps):
+            # 現在のステップの割合
+            ratio = float(i) / n_steps
+            # 次のステップの割合（次の開始点用）
+            ratio_next = float(i + 1) / n_steps
+
+            # --- 現在の点 (Current Start) ---
+            pos_edge = p_start + (p_end - p_start) * ratio
+            rot_edge = interpolate_rotation_matrices(ratio, r_start, r_end)
+            av_edge = av_start + (av_end - av_start) * ratio
+
+            # --- 中心側の点 (Current Inner) ---
+            vec_to_center = center_pos - pos_edge
+            pos_inner = pos_edge + vec_to_center * sweep_ratio
+            rot_inner = rot_edge # 回転は維持
+
+            # --- 次の開始点 (Next Start) ---
+            # ※最後のステップでは辺の終点（次の辺の始点）になる
+            pos_next_edge = p_start + (p_end - p_start) * ratio_next
+            rot_next_edge = interpolate_rotation_matrices(ratio_next, r_start, r_end)
+            av_next_edge = av_start + (av_end - av_start) * ratio_next
+
+            # --- 持ち上げ点 (Lifted Points) ---
+            pos_inner_lift = pos_inner + lift_vec
+            pos_next_edge_lift = pos_next_edge + lift_vec
+
+            # 座標系(Coordinates)を作成
+            wp_edge = Coordinates(pos=pos_edge, rot=rot_edge)
+            wp_inner = Coordinates(pos=pos_inner, rot=rot_inner)
+            wp_inner_lift = Coordinates(pos=pos_inner_lift, rot=rot_inner)
+            wp_next_lift = Coordinates(pos=pos_next_edge_lift, rot=rot_next_edge)
+            wp_next_edge = Coordinates(pos=pos_next_edge, rot=rot_next_edge)
+
+            # --- 軌道生成シーケンス ---
+            # 1. 辺の上 (Start)
+            # 2. 内側へ (Sweep In)
+            # 3. 内側で持ち上げ (Lift Up)
+            # 4. 持ち上げたまま次の開始位置へ (Move to Next Top)
+            # 5. 次の開始位置へ下ろす (Down to Next)
+            waypoints.extend([
+                wp_edge,
+                wp_inner,
+                wp_inner_lift,
+                wp_next_lift,
+                wp_next_edge
+            ])
+
+            # IKのSeed AV設定
+            seed_avs.extend([
+                av_edge,
+                av_edge,
+                av_edge,
+                av_next_edge,
+                av_next_edge
+            ])
+
+    return waypoints, seed_avs
 
 # ==========================================================
 #  Corner Teaching Task Class
@@ -76,11 +170,13 @@ class CornerTeachingTask(object):
     def __init__(self, ri, robot_model, prompt="wood tray", trajectory_generator=None):
         self.ri = ri
         self.robot_model = robot_model
-        
+
         # --- 設定値の受け取り ---
         self.prompt = prompt
         # 軌道生成関数が指定されていなければ、デフォルトのジグザグを使用
         self.trajectory_generator = trajectory_generator if trajectory_generator else generate_zigzag_trajectory
+        self.target_speed = 0.15  # [m/s]
+        self.min_time_step = 0.3
 
         # --- TF初期化 ---
         self.tf_listener = tf.TransformListener()
@@ -106,7 +202,7 @@ class CornerTeachingTask(object):
 
         # [Vision Mode Only] 画像認識時のみ使用するパラメータ
         self.vision_target_offset = np.array([0.0, 0.0, 0.0])
-        self.vision_area_margin = 0.0
+        self.vision_area_margin = 0.05
 
         # --- リンク設定 ---
         self._setup_kinematics()
@@ -261,7 +357,7 @@ class CornerTeachingTask(object):
                 self.update_display("Vision\n1:Start 2:Seed")
             else:
                 self.update_display("Seed OK\n1:Start 2:ReSeed")
-            
+
             btn = self.wait_for_button_press(valid_buttons=[1, 2], timeout=1.0)
             if btn == 2:
                 manual_seed_av = self.ri.angle_vector()
@@ -346,7 +442,7 @@ class CornerTeachingTask(object):
 
             dist_stroke = np.linalg.norm(p1 - p0)
             dist_advance = np.linalg.norm(p3 - p0)
-            
+
             should_swap = False
             if long_side_stroke:
                 if dist_advance > dist_stroke:
@@ -358,7 +454,7 @@ class CornerTeachingTask(object):
             if should_swap:
                 rospy.loginfo("Swapping corners to match stroke preference.")
                 sorted_coords = [sorted_coords[0], sorted_coords[3], sorted_coords[2], sorted_coords[1]]
-            
+
             base_coords_list = sorted_coords
 
         positions = np.array([c.worldpos() for c in base_coords_list])
@@ -414,8 +510,23 @@ class CornerTeachingTask(object):
             return
 
         self.av_seq = seq
-        self.times = [1.0] * len(self.av_seq)
-        rospy.loginfo("Plan ready.")
+        self.times = []
+        # 最初の点は、開始姿勢(av_seq[0])へ移動済みとして、短い時間または0を入れる
+        self.times.append(1.0)
+        # 2点目以降の時間を計算
+        for i in range(1, len(waypoints)):
+            # 前回の座標と今回の座標の距離を計算
+            pos_prev = np.array(waypoints[i-1].worldpos())
+            pos_curr = np.array(waypoints[i].worldpos())
+            dist = np.linalg.norm(pos_curr - pos_prev)
+            # 時間 = 距離 / 速度
+            # ただしゼロ割防止と、回転のみの動作考慮で最小時間を設ける
+            dt = max(self.min_time_step, dist / self.target_speed)
+            self.times.append(dt)
+
+        # 合計時間をログ表示
+        total_time = sum(self.times)
+        rospy.loginfo(f"Plan ready. Total waypoints: {len(self.av_seq)}, Est. Duration: {total_time:.1f}s, Speed: {self.target_speed}m/s")
 
     def solve_full_ik(self, waypoints, seed_avs):
         rospy.loginfo("Solving IK for full trajectory...")
@@ -501,13 +612,15 @@ def main():
         #  Taskの設定 (ここで動作とプロンプトを指定)
         # ==========================================================
         # 例1: デフォルト (木製トレイの汚れ、ジグザグ動作)
-        target_prompt = "wood tray"
-        target_trajectory_func = generate_zigzag_trajectory
+        # target_prompt = "wood tray"
+        # target_trajectory_func = generate_zigzag_trajectory
+        target_prompt = "green area"
+        target_trajectory_func = generate_radial_gathering_trajectory
 
         task = CornerTeachingTask(
-            ri, 
-            robot_model, 
-            prompt=target_prompt, 
+            ri,
+            robot_model,
+            prompt=target_prompt,
             trajectory_generator=target_trajectory_func
         )
         task.run()
