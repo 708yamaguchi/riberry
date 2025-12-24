@@ -53,19 +53,19 @@ class CleaningTask(object):
 
         # [Vision Mode Only] 画像認識時のみ使用するパラメータ
         # たわみ補正等のためのZ方向オフセット [m] (Visionモードのみ適用)
-        self.vision_target_offset = np.array([0.0, 0.0, -0.02])
+        self.vision_target_offset = np.array([0.0, 0.03, 0.05])
         # 認識領域の拡大・縮小マージン [m] (プラスで拡大、マイナスで縮小)
-        self.vision_area_margin = 0.05
+        self.vision_area_margin = -0.02
 
         # --- リンク設定 ---
         self._setup_kinematics()
 
     def _setup_kinematics(self):
         """ハードコードされたリンクを用いて手先座標系とIKチェーンを設定"""
-        
+
         # 1. 物理リンク名のハードコード
         target_link_name = 'module5_base_link'
-        
+
         # 2. 物理リンクオブジェクトの取得
         if hasattr(self.robot_model, target_link_name):
             physical_link = getattr(self.robot_model, target_link_name)
@@ -79,19 +79,11 @@ class CleaningTask(object):
         # 3. 手先座標系 (self.end_coords) の作成
         # make_cascoordsを使って、物理リンクを親とする座標系を作成
         self.end_coords = make_cascoords(parent=physical_link)
-        
-        # 指定した物理リンクのローカル座標系(wrt='local')でエンドエフェクタ位置を指定
-        ee_offset = (0.0, 0.0, 0.085)
-        self.end_coords.translate(ee_offset, wrt="local")
 
-        # 4. IK計算用のリンクチェーン生成
-        self.link_list = []
-        link = physical_link.parent
-        while link and link != self.robot_model:
-            if hasattr(link, 'joint') and link.joint:
-                self.link_list.append(link)
-            link = link.parent
-        self.link_list.reverse()
+        # 指定した物理リンクのローカル座標系(wrt='local')でエンドエフェクタ位置を指定
+        # ee_offset = (0.0, 0.0, 0.085)
+        ee_offset = (-0.1, 0.0, 0.2)
+        self.end_coords.translate(ee_offset, wrt="local")
 
         rospy.loginfo(f"Target Physical Link: {physical_link.name}")
         rospy.loginfo(f"End Effector set with local offset {ee_offset}")
@@ -107,9 +99,15 @@ class CleaningTask(object):
     def _cb_atom_button(self, msg):
         self.current_button_state = msg.data
 
-    def wait_for_button_press(self, valid_buttons=[1, 2, 3]):
+    def wait_for_button_press(self, valid_buttons=[1, 2, 3], timeout=None):
         self.current_button_state = 0
+        start_time = time.time()
+
         while not rospy.is_shutdown():
+            # タイムアウト判定
+            if timeout is not None and (time.time() - start_time > timeout):
+                return None
+
             if self.atom_mode == "DisplayInformationMode":
                 btn = self.current_button_state
                 if btn in valid_buttons:
@@ -152,7 +150,6 @@ class CleaningTask(object):
 
         result = self.robot_model.inverse_kinematics(
             target_coords=target_coords,
-            link_list=self.link_list,
             move_target=self.end_coords,
             rotation_axis=True,
             stop=50,
@@ -182,7 +179,7 @@ class CleaningTask(object):
             self.teach_corners_manual()
         elif btn == 2:
             rospy.loginfo("Input: 2 -> Vision Mode")
-            self.teach_corners_vision()
+            self.teach_corners_vision(long_side_stroke=True)
 
     # ==========================================================
     #  Manual Teaching
@@ -218,22 +215,47 @@ class CleaningTask(object):
     # ==========================================================
     #  Vision Teaching
     # ==========================================================
-    def teach_corners_vision(self):
+    # True: 長い辺に沿って動く
+    # False: 短い辺に沿って動き、長い辺方向へ進行していく
+    def teach_corners_vision(self, long_side_stroke=True):
         if VisualPose is None:
             rospy.logerr("VisualPose service not imported.")
             self.update_display("Err:NoSrv\nCheckCode")
             return
 
-        # self.update_display("Vision\nCapture!")
-        # rospy.loginfo("Vision Capture!...")
+        manual_seed_av = None
+        # ユーザーが動かしやすいように最初はサーボOFFにしておく
+        self.ri.servo_off()
+        while not rospy.is_shutdown():
+            # 状態に応じて表示を切り替え
+            if manual_seed_av is None:
+                self.update_display("Vision\n1:Start 2:Seed")
+            else:
+                self.update_display("Seed OK\n1:Start 2:ReSeed")
+            # ボタン待ち。1.0秒でタイムアウトして画面を更新し直す
+            btn = self.wait_for_button_press(valid_buttons=[1, 2], timeout=1.0)
+            if btn == 2:
+                # 2クリック: 現在の姿勢をIKの初期解(Seed)として保存
+                manual_seed_av = self.ri.angle_vector()
+                rospy.loginfo("Manual seed_av captured.")
+                self.update_display("Seed Saved!")
+                time.sleep(1.0)
+                # ループの先頭に戻る
+                continue
+            elif btn == 1:
+                # 1クリック: 画像認識フローへ進む
+                break
+
         rospy.loginfo("Vision Mode: Servo ON. Starting countdown.")
         self.ri.servo_on()
+
         # 3秒カウントダウン (3 -> 2 -> 1)
         for i in range(3, 0, -1):
             msg = f"Vision\n{i}..."
             self.update_display(msg)
             rospy.loginfo(f"Countdown: {i}")
             time.sleep(1.0)
+
         # 撮影タイミング表示
         self.update_display("Vision\nCapture!")
         rospy.loginfo("Capturing now...")
@@ -247,16 +269,22 @@ class CleaningTask(object):
             return
 
         # req = VisualPoseRequest(prompt="dirty area", mode="corners")
-        # req = VisualPoseRequest(prompt="detect cleaning area", mode="corners")
-        # req = VisualPoseRequest(prompt="Green tape area", mode="corners")
-        # req = VisualPoseRequest(prompt="Coffee powder", mode="corners")
-        req = VisualPoseRequest(prompt="Coffee stains", mode="corners")
+        req = VisualPoseRequest(prompt="wood tray", mode="corners")
         rospy.loginfo(f"Calling Vision Service... prompt={req.prompt}")
         self.update_display("Vision\nThinking...")
 
-        # 認識時の姿勢（回転）を基準にするため保存
-        seed_av = self.ri.angle_vector()
+        # --- 変更: Seedの決定 ---
+        # 2クリックで保存されたSeedがあれば使い、なければ現在の姿勢(撮影姿勢)を使う
+        if manual_seed_av is not None:
+            seed_av = manual_seed_av
+            rospy.loginfo("Using Manually set Seed AV for IK.")
+        else:
+            seed_av = self.ri.angle_vector()
+            rospy.loginfo("Using Capture Pose as Seed AV (No manual seed set).")
+
+        # モデルにSeedを反映
         self.robot_model.angle_vector(seed_av)
+        # 認識時の姿勢（回転）を基準にするため保存
         base_rot = self.end_coords.worldrot()
 
         try:
@@ -282,6 +310,54 @@ class CleaningTask(object):
                 return
             base_coords_list.append(c)
 
+        # 設定に応じてストローク方向（長辺or短辺）を決定する
+        if len(base_coords_list) == 4:
+            # (1) 矩形として整列（重心周りの角度でソート 0->1->2->3）
+            raw_pos = np.array([c.worldpos() for c in base_coords_list])
+            center = raw_pos.mean(axis=0)
+            angles = np.arctan2(raw_pos[:, 1] - center[1], raw_pos[:, 0] - center[0])
+            sorted_indices = np.argsort(angles)
+            sorted_coords = [base_coords_list[i] for i in sorted_indices]
+
+            # (2) ロボット（原点）に最も近い点を index 0 (始点) にシフト
+            dists = [np.linalg.norm(c.worldpos()) for c in sorted_coords]
+            min_idx = np.argmin(dists)
+            sorted_coords = sorted_coords[min_idx:] + sorted_coords[:min_idx]
+
+            # (3) 辺の長さを比較して、設定(long_side_stroke)に合わせて入替判定
+            p0 = sorted_coords[0].worldpos()
+            p1 = sorted_coords[1].worldpos() # 現在のストローク方向(0->1)
+            p3 = sorted_coords[3].worldpos() # 現在の進行方向(0->3)
+
+            dist_stroke = np.linalg.norm(p1 - p0)
+            dist_advance = np.linalg.norm(p3 - p0)
+
+            rospy.loginfo(f"Dims: Stroke={dist_stroke:.3f}, Advance={dist_advance:.3f}, PreferLong={long_side_stroke}")
+            
+            should_swap = False
+
+            if long_side_stroke:
+                # 「長辺をストロークにしたい」設定の場合
+                # 進行方向の方が長い（＝現在のストロークが短い）なら入れ替える
+                if dist_advance > dist_stroke:
+                    should_swap = True
+            else:
+                # 「短辺をストロークにしたい（＝進行方向を長くしたい）」設定の場合
+                # ストローク方向の方が長いなら入れ替える
+                if dist_stroke > dist_advance:
+                    should_swap = True
+
+            if should_swap:
+                rospy.loginfo("Swapping corners to match stroke preference.")
+                # 0->3 を新しいストローク方向(0->1)にするよう順序変更
+                # 元: 0(近), 1(右), 2(奥右), 3(奥左)
+                # 新: 0(近), 3(奥左), 2(奥右), 1(右) ... 原点0から見て左回りの矩形を右回りに読み替えるイメージ
+                sorted_coords = [sorted_coords[0], sorted_coords[3], sorted_coords[2], sorted_coords[1]]
+            else:
+                rospy.loginfo("Keeping corners order.")
+
+            base_coords_list = sorted_coords
+
         # 2. 中心点（重心）を計算
         positions = np.array([c.worldpos() for c in base_coords_list])
         center_pos = np.mean(positions, axis=0)
@@ -294,11 +370,9 @@ class CleaningTask(object):
             pos = raw_coord.worldpos()
 
             # --- 領域サイズの拡大・縮小 (Vision Modeのみ) ---
-            # 中心から各頂点へのベクトル
             vec = pos - center_pos
             vec_len = np.linalg.norm(vec)
             if vec_len > 1e-6:
-                # ベクトル方向にマージン分だけ移動させる
                 direction = vec / vec_len
                 pos = pos + direction * self.vision_area_margin
 
@@ -308,7 +382,7 @@ class CleaningTask(object):
             # ターゲット作成
             target = Coordinates(pos=pos, rot=base_rot)
 
-            # IK計算
+            # IK計算 (seed_avを使用)
             av = self._solve_ik(target, seed_av)
             if av is None:
                 rospy.logerr(f"IK Failed for Vision Corner {i+1}")
@@ -348,7 +422,7 @@ class CleaningTask(object):
         self.times = [1.0] * len(self.av_seq)
         rospy.loginfo("Plan ready.")
 
-    def generate_zigzag_trajectory(self, corners, corner_avs, step_width=0.01):
+    def generate_zigzag_trajectory(self, corners, corner_avs, step_width=0.02):
         """
         コーナー座標間を補間してジグザグ軌道を生成する。
         Manual/Visionですでにオフセット処理済みの座標が渡されるため、
@@ -441,7 +515,8 @@ class CleaningTask(object):
         rospy.loginfo("Task Node Ready.")
         while not rospy.is_shutdown():
             self.update_display("1:Teach\n2:Play\n3:Free")
-            btn = self.wait_for_button_press()
+            # 1.0秒待機。押されなければNoneが返り、再描画される
+            btn = self.wait_for_button_press(timeout=1.0)
 
             if btn == 1:
                 self.teach_mode_entry()
