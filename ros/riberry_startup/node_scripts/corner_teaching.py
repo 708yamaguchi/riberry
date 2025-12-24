@@ -24,10 +24,63 @@ except ImportError:
     VisualPose = None
 
 
-class CleaningTask(object):
-    def __init__(self, ri, robot_model):
+# ==========================================================
+#  Trajectory Generators (動作パターン関数)
+# ==========================================================
+def generate_zigzag_trajectory(corners, corner_avs, step_width=0.02):
+    """
+    コーナー座標間を補間してジグザグ軌道を生成する関数。
+    """
+    p = [c.worldpos() for c in corners]
+    r = [c.worldrot() for c in corners]
+    av = corner_avs
+
+    # 進行方向(0->3)の長さを基準にステップ数を計算
+    len_advance = np.linalg.norm(p[3] - p[0])
+    n_steps = max(1, int(len_advance / step_width))
+
+    waypoints = []
+    seed_avs = []
+
+    for i in range(n_steps + 1):
+        ratio = float(i) / n_steps
+        # 位置の補間 (進行方向の左右の点を計算)
+        base_left = p[0] + (p[3] - p[0]) * ratio
+        base_right = p[1] + (p[2] - p[1]) * ratio
+
+        # 回転とAVの補間
+        rot_left = interpolate_rotation_matrices(ratio, r[0], r[3])
+        rot_right = interpolate_rotation_matrices(ratio, r[1], r[2])
+        av_left = av[0] + (av[3] - av[0]) * ratio
+        av_right = av[1] + (av[2] - av[1]) * ratio
+
+        # 座標系作成
+        wp_l = Coordinates(pos=base_left, rot=rot_left)
+        wp_r = Coordinates(pos=base_right, rot=rot_right)
+
+        # 偶数回は左→右、奇数回は右→左（ジグザグ動作）
+        if i % 2 == 0:
+            waypoints.extend([wp_l, wp_r])
+            seed_avs.extend([av_left, av_right])
+        else:
+            waypoints.extend([wp_r, wp_l])
+            seed_avs.extend([av_right, av_left])
+
+    return waypoints, seed_avs
+
+
+# ==========================================================
+#  Corner Teaching Task Class
+# ==========================================================
+class CornerTeachingTask(object):
+    def __init__(self, ri, robot_model, prompt="wood tray", trajectory_generator=None):
         self.ri = ri
         self.robot_model = robot_model
+        
+        # --- 設定値の受け取り ---
+        self.prompt = prompt
+        # 軌道生成関数が指定されていなければ、デフォルトのジグザグを使用
+        self.trajectory_generator = trajectory_generator if trajectory_generator else generate_zigzag_trajectory
 
         # --- TF初期化 ---
         self.tf_listener = tf.TransformListener()
@@ -48,41 +101,31 @@ class CleaningTask(object):
         self.av_seq = []
         self.times = []
 
-        # --- 設定値 ---
+        # --- IK設定値 ---
         self.error_tolerance = 0.02  # IK許容誤差[m]
 
         # [Vision Mode Only] 画像認識時のみ使用するパラメータ
-        # たわみ補正等のためのZ方向オフセット [m] (Visionモードのみ適用)
-        self.vision_target_offset = np.array([0.0, 0.03, 0.05])
-        # 認識領域の拡大・縮小マージン [m] (プラスで拡大、マイナスで縮小)
-        self.vision_area_margin = -0.02
+        self.vision_target_offset = np.array([0.0, 0.0, 0.0])
+        self.vision_area_margin = 0.0
 
         # --- リンク設定 ---
         self._setup_kinematics()
 
     def _setup_kinematics(self):
         """ハードコードされたリンクを用いて手先座標系とIKチェーンを設定"""
-
-        # 1. 物理リンク名のハードコード
         target_link_name = 'module5_base_link'
 
-        # 2. 物理リンクオブジェクトの取得
         if hasattr(self.robot_model, target_link_name):
             physical_link = getattr(self.robot_model, target_link_name)
         else:
-            # 属性としてアクセスできない場合の検索
             found = next((l for l in self.robot_model.link_list if l.name == target_link_name), None)
             if not found:
                 raise ValueError(f"Link '{target_link_name}' not found.")
             physical_link = found
 
-        # 3. 手先座標系 (self.end_coords) の作成
-        # make_cascoordsを使って、物理リンクを親とする座標系を作成
         self.end_coords = make_cascoords(parent=physical_link)
-
-        # 指定した物理リンクのローカル座標系(wrt='local')でエンドエフェクタ位置を指定
-        # ee_offset = (0.0, 0.0, 0.085)
-        ee_offset = (-0.1, 0.0, 0.2)
+        # ee_offset = (-0.1, 0.0, 0.2)  # 刷毛把持用
+        ee_offset = (0.0, 0.0, 0.08)  # デフォルトグリッパ
         self.end_coords.translate(ee_offset, wrt="local")
 
         rospy.loginfo(f"Target Physical Link: {physical_link.name}")
@@ -104,7 +147,6 @@ class CleaningTask(object):
         start_time = time.time()
 
         while not rospy.is_shutdown():
-            # タイムアウト判定
             if timeout is not None and (time.time() - start_time > timeout):
                 return None
 
@@ -121,7 +163,6 @@ class CleaningTask(object):
     #  Helper: 共通処理 (TF変換 / IK計算)
     # ==========================================================
     def get_base_coords_from_camera(self, pose_msg):
-        """カメラ座標系のPoseをBase座標系のCoordinatesに変換して返す"""
         try:
             self.tf_listener.waitForTransform(self.base_frame, self.camera_frame, rospy.Time(0), rospy.Duration(1.0))
             (trans, rot) = self.tf_listener.lookupTransform(self.base_frame, self.camera_frame, rospy.Time(0))
@@ -129,25 +170,20 @@ class CleaningTask(object):
             rospy.logerr(f"TF Error: {e}")
             return None
 
-        # Camera -> Base の変換行列
         rot_matrix = quaternion2matrix([rot[3], rot[0], rot[1], rot[2]])
         co_base_to_cam = Coordinates(pos=trans, rot=rot_matrix)
 
-        # Camera -> Object (回転は無視して単位行列)
         co_cam_to_obj = Coordinates(
             pos=[pose_msg.position.x, pose_msg.position.y, pose_msg.position.z],
             rot=np.eye(3)
         )
 
-        # Base -> Object
         co_base_to_obj = co_base_to_cam.copy()
         co_base_to_obj.transform(co_cam_to_obj)
         return co_base_to_obj
 
     def _solve_ik(self, target_coords, seed_av):
-        """IKを解く共通関数。失敗時は許容誤差内なら採用、だめならNoneを返す"""
         self.robot_model.angle_vector(seed_av)
-
         result = self.robot_model.inverse_kinematics(
             target_coords=target_coords,
             move_target=self.end_coords,
@@ -162,7 +198,6 @@ class CleaningTask(object):
         if is_success:
             return self.robot_model.angle_vector()
         elif dist_err < self.error_tolerance:
-            # 厳密解ではないが許容範囲内
             return self.robot_model.angle_vector()
         else:
             return None
@@ -185,7 +220,6 @@ class CleaningTask(object):
     #  Manual Teaching
     # ==========================================================
     def teach_corners_manual(self):
-        """手動教示: 終了時にサーボONせず、脱力状態を維持する"""
         temp_corners = []
         temp_avs = []
 
@@ -202,7 +236,6 @@ class CleaningTask(object):
             current_av = self.ri.angle_vector()
             self.robot_model.angle_vector(current_av)
 
-            # マニュアル時は現在値をそのまま使う（オフセットなし）
             temp_corners.append(self.end_coords.copy_worldcoords())
             temp_avs.append(current_av)
             rospy.loginfo(f"Captured Corner {i+1}")
@@ -215,8 +248,6 @@ class CleaningTask(object):
     # ==========================================================
     #  Vision Teaching
     # ==========================================================
-    # True: 長い辺に沿って動く
-    # False: 短い辺に沿って動き、長い辺方向へ進行していく
     def teach_corners_vision(self, long_side_stroke=True):
         if VisualPose is None:
             rospy.logerr("VisualPose service not imported.")
@@ -224,39 +255,32 @@ class CleaningTask(object):
             return
 
         manual_seed_av = None
-        # ユーザーが動かしやすいように最初はサーボOFFにしておく
         self.ri.servo_off()
         while not rospy.is_shutdown():
-            # 状態に応じて表示を切り替え
             if manual_seed_av is None:
                 self.update_display("Vision\n1:Start 2:Seed")
             else:
                 self.update_display("Seed OK\n1:Start 2:ReSeed")
-            # ボタン待ち。1.0秒でタイムアウトして画面を更新し直す
+            
             btn = self.wait_for_button_press(valid_buttons=[1, 2], timeout=1.0)
             if btn == 2:
-                # 2クリック: 現在の姿勢をIKの初期解(Seed)として保存
                 manual_seed_av = self.ri.angle_vector()
                 rospy.loginfo("Manual seed_av captured.")
                 self.update_display("Seed Saved!")
                 time.sleep(1.0)
-                # ループの先頭に戻る
                 continue
             elif btn == 1:
-                # 1クリック: 画像認識フローへ進む
                 break
 
         rospy.loginfo("Vision Mode: Servo ON. Starting countdown.")
         self.ri.servo_on()
 
-        # 3秒カウントダウン (3 -> 2 -> 1)
         for i in range(3, 0, -1):
             msg = f"Vision\n{i}..."
             self.update_display(msg)
             rospy.loginfo(f"Countdown: {i}")
             time.sleep(1.0)
 
-        # 撮影タイミング表示
         self.update_display("Vision\nCapture!")
         rospy.loginfo("Capturing now...")
 
@@ -268,13 +292,11 @@ class CleaningTask(object):
             self.update_display("Srv Timeout\nCheck ROS")
             return
 
-        # req = VisualPoseRequest(prompt="dirty area", mode="corners")
-        req = VisualPoseRequest(prompt="wood tray", mode="corners")
+        # --- 指定されたプロンプトを使用 ---
+        req = VisualPoseRequest(prompt=self.prompt, mode="corners")
         rospy.loginfo(f"Calling Vision Service... prompt={req.prompt}")
         self.update_display("Vision\nThinking...")
 
-        # --- 変更: Seedの決定 ---
-        # 2クリックで保存されたSeedがあれば使い、なければ現在の姿勢(撮影姿勢)を使う
         if manual_seed_av is not None:
             seed_av = manual_seed_av
             rospy.loginfo("Using Manually set Seed AV for IK.")
@@ -282,9 +304,7 @@ class CleaningTask(object):
             seed_av = self.ri.angle_vector()
             rospy.loginfo("Using Capture Pose as Seed AV (No manual seed set).")
 
-        # モデルにSeedを反映
         self.robot_model.angle_vector(seed_av)
-        # 認識時の姿勢（回転）を基準にするため保存
         base_rot = self.end_coords.worldrot()
 
         try:
@@ -301,7 +321,6 @@ class CleaningTask(object):
 
         rospy.loginfo("Vision Success! Applying offsets & Calculating IK...")
 
-        # 1. まず4点のBase座標を取得
         base_coords_list = []
         for pose_msg in res.poses:
             c = self.get_base_coords_from_camera(pose_msg)
@@ -310,79 +329,55 @@ class CleaningTask(object):
                 return
             base_coords_list.append(c)
 
-        # 設定に応じてストローク方向（長辺or短辺）を決定する
         if len(base_coords_list) == 4:
-            # (1) 矩形として整列（重心周りの角度でソート 0->1->2->3）
             raw_pos = np.array([c.worldpos() for c in base_coords_list])
             center = raw_pos.mean(axis=0)
             angles = np.arctan2(raw_pos[:, 1] - center[1], raw_pos[:, 0] - center[0])
             sorted_indices = np.argsort(angles)
             sorted_coords = [base_coords_list[i] for i in sorted_indices]
 
-            # (2) ロボット（原点）に最も近い点を index 0 (始点) にシフト
             dists = [np.linalg.norm(c.worldpos()) for c in sorted_coords]
             min_idx = np.argmin(dists)
             sorted_coords = sorted_coords[min_idx:] + sorted_coords[:min_idx]
 
-            # (3) 辺の長さを比較して、設定(long_side_stroke)に合わせて入替判定
             p0 = sorted_coords[0].worldpos()
-            p1 = sorted_coords[1].worldpos() # 現在のストローク方向(0->1)
-            p3 = sorted_coords[3].worldpos() # 現在の進行方向(0->3)
+            p1 = sorted_coords[1].worldpos()
+            p3 = sorted_coords[3].worldpos()
 
             dist_stroke = np.linalg.norm(p1 - p0)
             dist_advance = np.linalg.norm(p3 - p0)
-
-            rospy.loginfo(f"Dims: Stroke={dist_stroke:.3f}, Advance={dist_advance:.3f}, PreferLong={long_side_stroke}")
             
             should_swap = False
-
             if long_side_stroke:
-                # 「長辺をストロークにしたい」設定の場合
-                # 進行方向の方が長い（＝現在のストロークが短い）なら入れ替える
                 if dist_advance > dist_stroke:
                     should_swap = True
             else:
-                # 「短辺をストロークにしたい（＝進行方向を長くしたい）」設定の場合
-                # ストローク方向の方が長いなら入れ替える
                 if dist_stroke > dist_advance:
                     should_swap = True
 
             if should_swap:
                 rospy.loginfo("Swapping corners to match stroke preference.")
-                # 0->3 を新しいストローク方向(0->1)にするよう順序変更
-                # 元: 0(近), 1(右), 2(奥右), 3(奥左)
-                # 新: 0(近), 3(奥左), 2(奥右), 1(右) ... 原点0から見て左回りの矩形を右回りに読み替えるイメージ
                 sorted_coords = [sorted_coords[0], sorted_coords[3], sorted_coords[2], sorted_coords[1]]
-            else:
-                rospy.loginfo("Keeping corners order.")
-
+            
             base_coords_list = sorted_coords
 
-        # 2. 中心点（重心）を計算
         positions = np.array([c.worldpos() for c in base_coords_list])
         center_pos = np.mean(positions, axis=0)
 
         temp_corners = []
         temp_avs = []
 
-        # 3. 拡大/縮小 と Zオフセットの適用、IK計算
         for i, raw_coord in enumerate(base_coords_list):
             pos = raw_coord.worldpos()
-
-            # --- 領域サイズの拡大・縮小 (Vision Modeのみ) ---
             vec = pos - center_pos
             vec_len = np.linalg.norm(vec)
             if vec_len > 1e-6:
                 direction = vec / vec_len
                 pos = pos + direction * self.vision_area_margin
 
-            # --- Z方向オフセット (Vision Modeのみ) ---
             pos += self.vision_target_offset
-
-            # ターゲット作成
             target = Coordinates(pos=pos, rot=base_rot)
 
-            # IK計算 (seed_avを使用)
             av = self._solve_ik(target, seed_av)
             if av is None:
                 rospy.logerr(f"IK Failed for Vision Corner {i+1}")
@@ -406,10 +401,10 @@ class CleaningTask(object):
         if len(self.corners) != 4:
             return
 
-        # 軌道生成（座標補間のみ）
-        waypoints, seed_avs = self.generate_zigzag_trajectory(self.corners, self.corner_avs)
+        # --- 外部から注入された軌道生成関数を使用 ---
+        rospy.loginfo(f"Generating trajectory using: {self.trajectory_generator.__name__}")
+        waypoints, seed_avs = self.trajectory_generator(self.corners, self.corner_avs)
 
-        # IKで全関節角度列を生成
         seq = self.solve_full_ik(waypoints, seed_avs)
 
         if seq is None:
@@ -421,47 +416,6 @@ class CleaningTask(object):
         self.av_seq = seq
         self.times = [1.0] * len(self.av_seq)
         rospy.loginfo("Plan ready.")
-
-    def generate_zigzag_trajectory(self, corners, corner_avs, step_width=0.02):
-        """
-        コーナー座標間を補間してジグザグ軌道を生成する。
-        Manual/Visionですでにオフセット処理済みの座標が渡されるため、
-        ここでは単純な補間のみを行う。
-        """
-        p = [c.worldpos() for c in corners]
-        r = [c.worldrot() for c in corners]
-        av = corner_avs
-
-        len_advance = np.linalg.norm(p[3] - p[0])
-        n_steps = max(1, int(len_advance / step_width))
-
-        waypoints = []
-        seed_avs = []
-
-        for i in range(n_steps + 1):
-            ratio = float(i) / n_steps
-            # 位置の補間
-            base_left = p[0] + (p[3] - p[0]) * ratio
-            base_right = p[1] + (p[2] - p[1]) * ratio
-
-            # 回転とAVの補間
-            rot_left = interpolate_rotation_matrices(ratio, r[0], r[3])
-            rot_right = interpolate_rotation_matrices(ratio, r[1], r[2])
-            av_left = av[0] + (av[3] - av[0]) * ratio
-            av_right = av[1] + (av[2] - av[1]) * ratio
-
-            # 往復動作の生成 (オフセット加算は行わない)
-            wp_l = Coordinates(pos=base_left, rot=rot_left)
-            wp_r = Coordinates(pos=base_right, rot=rot_right)
-
-            if i % 2 == 0:
-                waypoints.extend([wp_l, wp_r])
-                seed_avs.extend([av_left, av_right])
-            else:
-                waypoints.extend([wp_r, wp_l])
-                seed_avs.extend([av_right, av_left])
-
-        return waypoints, seed_avs
 
     def solve_full_ik(self, waypoints, seed_avs):
         rospy.loginfo("Solving IK for full trajectory...")
@@ -486,7 +440,6 @@ class CleaningTask(object):
             time.sleep(2.0)
             return
 
-        # --- 1. 開始時の姿勢を保存 ---
         rospy.loginfo("Saving start pose...")
         start_av = self.ri.angle_vector()
 
@@ -497,14 +450,11 @@ class CleaningTask(object):
         self.ri.angle_vector(self.av_seq[0], 3.0)
         self.ri.wait_interpolation()
 
-        # 動作再生
         self.ri.angle_vector_sequence(self.av_seq, times=self.times)
         self.ri.wait_interpolation()
 
-        # --- 2. 開始時の姿勢に戻る ---
         rospy.loginfo("Returning to start pose...")
         self.update_display("Back to\nStart")
-        # 少し時間をかけてゆっくり戻る (例: 3.0秒)
         self.ri.angle_vector(start_av, 3.0)
         self.ri.wait_interpolation()
 
@@ -515,7 +465,6 @@ class CleaningTask(object):
         rospy.loginfo("Task Node Ready.")
         while not rospy.is_shutdown():
             self.update_display("1:Teach\n2:Play\n3:Free")
-            # 1.0秒待機。押されなければNoneが返り、再描画される
             btn = self.wait_for_button_press(timeout=1.0)
 
             if btn == 1:
@@ -528,12 +477,12 @@ class CleaningTask(object):
                 self.ri.servo_off()
                 time.sleep(1.0)
 
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--namespace", type=str, default="")
     args = parser.parse_args()
-
-    rospy.init_node("kxr_cleaning_task", anonymous=True)
+    rospy.init_node("corner_teaching_task", anonymous=True)
 
     desc_param = args.namespace + "/robot_description" if is_ros_master_local() else args.namespace + "/robot_description_viz"
     if not is_ros_master_local():
@@ -548,7 +497,19 @@ def main():
     ri = KXRROSRobotInterface(robot_model, namespace=args.namespace, controller_timeout=60.0)
 
     try:
-        task = CleaningTask(ri, robot_model)
+        # ==========================================================
+        #  Taskの設定 (ここで動作とプロンプトを指定)
+        # ==========================================================
+        # 例1: デフォルト (木製トレイの汚れ、ジグザグ動作)
+        target_prompt = "wood tray"
+        target_trajectory_func = generate_zigzag_trajectory
+
+        task = CornerTeachingTask(
+            ri, 
+            robot_model, 
+            prompt=target_prompt, 
+            trajectory_generator=target_trajectory_func
+        )
         task.run()
     except Exception as e:
         rospy.logerr(f"Fatal Error: {e}")
