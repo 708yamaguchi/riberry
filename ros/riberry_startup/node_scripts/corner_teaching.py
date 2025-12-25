@@ -196,13 +196,14 @@ class CornerTeachingTask(object):
         self.corner_avs = []
         self.av_seq = []
         self.times = []
+        self.manual_seed_av = None
 
         # --- IK設定値 ---
         self.error_tolerance = 0.02  # IK許容誤差[m]
 
         # [Vision Mode Only] 画像認識時のみ使用するパラメータ
         self.vision_target_offset = np.array([0.0, 0.0, -0.02])
-        self.vision_area_margin = -0.03
+        self.vision_area_margin = -0.05
 
         # --- リンク設定 ---
         self._setup_kinematics()
@@ -346,29 +347,24 @@ class CornerTeachingTask(object):
     #  Vision Teaching
     # ==========================================================
     def teach_corners_vision(self, long_side_stroke=True):
-        if VisualPose is None:
-            rospy.logerr("VisualPose service not imported.")
-            self.update_display("Err:NoSrv\nCheckCode")
-            return
-
-        manual_seed_av = None
         self.ri.servo_off()
         while not rospy.is_shutdown():
-            if manual_seed_av is None:
-                self.update_display("Vision\n1:Start 2:Seed")
+            # Seed未設定時はStart(1)を押せないように制御
+            if self.manual_seed_av is None:
+                self.update_display("Need Seed\n2:Set Seed")
+                valid_btns = [2]  # ボタン2のみ有効
             else:
-                self.update_display("Seed OK\n1:Start 2:ReSeed")
-
-            btn = self.wait_for_button_press(valid_buttons=[1, 2], timeout=1.0)
+                self.update_display("Ready\n1:Start 2:ReSeed")
+                valid_btns = [1, 2] # 両方有効
+            btn = self.wait_for_button_press(valid_buttons=valid_btns, timeout=1.0)
             if btn == 2:
-                manual_seed_av = self.ri.angle_vector()
+                self.manual_seed_av = self.ri.angle_vector()
                 rospy.loginfo("Manual seed_av captured.")
                 self.update_display("Seed Saved!")
                 time.sleep(1.0)
                 continue
             elif btn == 1:
                 break
-
         rospy.loginfo("Vision Mode: Servo ON. Starting countdown.")
         self.ri.servo_on()
 
@@ -393,15 +389,9 @@ class CornerTeachingTask(object):
         req = VisualPoseRequest(prompt=self.prompt, mode="corners")
         rospy.loginfo(f"Calling Vision Service... prompt={req.prompt}")
         self.update_display("Vision\nThinking...")
+        rospy.loginfo("Using Manually set Seed AV.")
 
-        if manual_seed_av is not None:
-            seed_av = manual_seed_av
-            rospy.loginfo("Using Manually set Seed AV for IK.")
-        else:
-            seed_av = self.ri.angle_vector()
-            rospy.loginfo("Using Capture Pose as Seed AV (No manual seed set).")
-
-        self.robot_model.angle_vector(seed_av)
+        self.robot_model.angle_vector(self.manual_seed_av)
         base_rot = self.end_coords.worldrot()
 
         try:
@@ -475,7 +465,7 @@ class CornerTeachingTask(object):
             pos += self.vision_target_offset
             target = Coordinates(pos=pos, rot=base_rot)
 
-            av = self._solve_ik(target, seed_av)
+            av = self._solve_ik(target, self.manual_seed_av)
             if av is None:
                 rospy.logerr(f"IK Failed for Vision Corner {i+1}")
                 self.update_display(f"IK Fail\nCorner{i+1}")
