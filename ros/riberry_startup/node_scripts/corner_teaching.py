@@ -167,7 +167,7 @@ def generate_radial_gathering_trajectory(corners, corner_avs, step_width=0.04, s
 #  Corner Teaching Task Class
 # ==========================================================
 class CornerTeachingTask(object):
-    def __init__(self, ri, robot_model, prompt="wood tray", trajectory_generator=None):
+    def __init__(self, ri, robot_model, prompt, trajectory_generator=None):
         self.ri = ri
         self.robot_model = robot_model
 
@@ -201,8 +201,8 @@ class CornerTeachingTask(object):
         self.error_tolerance = 0.02  # IK許容誤差[m]
 
         # [Vision Mode Only] 画像認識時のみ使用するパラメータ
-        self.vision_target_offset = np.array([0.0, 0.0, 0.0])
-        self.vision_area_margin = 0.05
+        self.vision_target_offset = np.array([0.0, 0.0, -0.02])
+        self.vision_area_margin = -0.03
 
         # --- リンク設定 ---
         self._setup_kinematics()
@@ -221,7 +221,8 @@ class CornerTeachingTask(object):
 
         self.end_coords = make_cascoords(parent=physical_link)
         # ee_offset = (-0.1, 0.0, 0.2)  # 刷毛把持用
-        ee_offset = (0.0, 0.0, 0.08)  # デフォルトグリッパ
+        ee_offset = (-0.12, 0.0, 0.08)  # 糊用グリッパ
+        # ee_offset = (0.0, 0.0, 0.08)  # デフォルトグリッパ
         self.end_coords.translate(ee_offset, wrt="local")
 
         rospy.loginfo(f"Target Physical Link: {physical_link.name}")
@@ -555,14 +556,26 @@ class CornerTeachingTask(object):
         start_av = self.ri.angle_vector()
 
         rospy.loginfo("Executing motion...")
-        self.update_display("Playing\n...")
+        self.update_display("Playing\n1:STOP")
         self.ri.servo_on()
         rospy.loginfo("Moving to trajectory start (3.0s)...")
         self.ri.angle_vector(self.av_seq[0], 3.0)
         self.ri.wait_interpolation()
 
         self.ri.angle_vector_sequence(self.av_seq, times=self.times)
-        self.ri.wait_interpolation()
+        is_canceled = False
+        # 1クリックで動作をキャンセル
+        while not rospy.is_shutdown() and self.ri.is_interpolating():
+            btn = self.wait_for_button_press(valid_buttons=[1], timeout=0.1)
+            if btn == 1:
+                self.ri.cancel_angle_vector()  # 動作をキャンセル
+                is_canceled = True
+                break
+        if is_canceled:
+            rospy.loginfo("Play interrupted by user.")
+            self.update_display("STOPPED")
+            time.sleep(1.0)
+            return
 
         rospy.loginfo("Returning to start pose...")
         self.update_display("Back to\nStart")
@@ -613,9 +626,10 @@ def main():
         # ==========================================================
         # 例1: デフォルト (木製トレイの汚れ、ジグザグ動作)
         # target_prompt = "wood tray"
-        # target_trajectory_func = generate_zigzag_trajectory
-        target_prompt = "green area"
-        target_trajectory_func = generate_radial_gathering_trajectory
+        target_trajectory_func = generate_zigzag_trajectory
+        # target_prompt = "green area"
+        # target_trajectory_func = generate_radial_gathering_trajectory
+        target_prompt = "golden plate"
 
         task = CornerTeachingTask(
             ri,
