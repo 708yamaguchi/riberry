@@ -3,11 +3,13 @@
 
 import argparse
 import time
+import math
 import numpy as np
 import rospy
 import tf
 
 from std_msgs.msg import String, Int32
+from sensor_msgs.msg import Imu
 from geometry_msgs.msg import Pose
 
 from skrobot.model import RobotModel
@@ -27,7 +29,7 @@ except ImportError:
 # ==========================================================
 #  Trajectory Generators (動作パターン関数)
 # ==========================================================
-def generate_zigzag_trajectory(corners, corner_avs, step_width=0.02):
+def generate_zigzag_trajectory(corners, corner_avs, step_width=0.02, **kwargs):
     """
     コーナー座標間を補間してジグザグ軌道を生成する関数。
     """
@@ -68,7 +70,7 @@ def generate_zigzag_trajectory(corners, corner_avs, step_width=0.02):
 
     return waypoints, seed_avs
 
-def generate_radial_gathering_trajectory(corners, corner_avs, step_width=0.04, sweep_ratio=1.0, lift_offset=(0, 0, 0.05)):
+def generate_radial_gathering_trajectory(corners, corner_avs, step_width=0.02, sweep_ratio=1.0, lift_offset=None, **kwargs):
     """
     領域の外周（辺）から中心に向かって掃き寄せるような放射状の軌道を生成する。
     戻る動作の際にアームを持ち上げて、次の開始点へ移動する。
@@ -167,7 +169,7 @@ def generate_radial_gathering_trajectory(corners, corner_avs, step_width=0.04, s
 #  Corner Teaching Task Class
 # ==========================================================
 class CornerTeachingTask(object):
-    def __init__(self, ri, robot_model, prompt, trajectory_generator=None):
+    def __init__(self, ri, robot_model, prompt, trajectory_generator=None, vision_area_margin=0.0):
         self.ri = ri
         self.robot_model = robot_model
 
@@ -201,9 +203,15 @@ class CornerTeachingTask(object):
         # --- IK設定値 ---
         self.error_tolerance = 0.02  # IK許容誤差[m]
 
-        # [Vision Mode Only] 画像認識時のみ使用するパラメータ
-        self.vision_target_offset = np.array([0.0, 0.0, -0.02])
-        self.vision_area_margin = -0.05
+        # --- IMUと重力関連 ---
+        # 重力ベクトル (初期値はとりあえずZ下向きと仮定)
+        self.gravity_vector = None
+        rospy.Subscriber("/imu", Imu, self._cb_imu)
+
+        # [Vision Mode Only] 画像認識時のみ使用するパラメータ[m]
+        # 画像認識時の補正高さ (重力の逆方向にこの距離だけオフセット)
+        self.gravity_compensation_offset = 0.02
+        self.vision_area_margin = vision_area_margin
 
         # --- リンク設定 ---
         self._setup_kinematics()
@@ -222,8 +230,8 @@ class CornerTeachingTask(object):
 
         self.end_coords = make_cascoords(parent=physical_link)
         # ee_offset = (-0.1, 0.0, 0.2)  # 刷毛把持用
-        ee_offset = (-0.12, 0.0, 0.08)  # 糊用グリッパ
-        # ee_offset = (0.0, 0.0, 0.08)  # デフォルトグリッパ
+        # ee_offset = (-0.12, 0.0, 0.08)  # 糊用グリッパ
+        ee_offset = (0.0, 0.0, 0.08)  # デフォルトグリッパ
         self.end_coords.translate(ee_offset, wrt="local")
 
         rospy.loginfo(f"Target Physical Link: {physical_link.name}")
@@ -234,6 +242,15 @@ class CornerTeachingTask(object):
         self.pub_display.publish('\n' + text)
 
     # --- コールバック ---
+    def _cb_imu(self, data):
+        """IMUデータからロボットベース座標系における重力方向ベクトルを算出・保存する"""
+        # 1. IMU座標系(x, y, z) -> Base座標系(x, -y, -z)への変換と、加速度->重力(-acc)の変換
+        gx, gy, gz = -data.linear_acceleration.x, data.linear_acceleration.y, data.linear_acceleration.z
+        # 2. 正規化して保存
+        norm = math.sqrt(gx**2 + gy**2 + gz**2)
+        if norm > 0:
+            self.gravity_vector = np.array([gx/norm, gy/norm, gz/norm])
+
     def _cb_atom_mode(self, msg):
         self.atom_mode = msg.data
 
@@ -299,6 +316,14 @@ class CornerTeachingTask(object):
             return self.robot_model.angle_vector()
         else:
             return None
+
+    def _check_gravity_initialized(self):
+        """重力ベクトルが初期化されているか確認する。NGならエラー表示してFalseを返す"""
+        if self.gravity_vector is None:
+            rospy.logerr("Gravity vector is not initialized. Check IMU topic.")
+            self.update_display("Err:NoIMU")
+            return False
+        return True
 
     # ==========================================================
     #  Teach Mode Entry
@@ -454,6 +479,12 @@ class CornerTeachingTask(object):
         temp_corners = []
         temp_avs = []
 
+        if not self._check_gravity_initialized():
+            return
+
+        gravity_compensation_vec = self.gravity_vector * -1.0 * self.gravity_compensation_offset
+        rospy.loginfo(f"[Vision] Applying Gravity Compensation Vector: {gravity_compensation_vec}")
+
         for i, raw_coord in enumerate(base_coords_list):
             pos = raw_coord.worldpos()
             vec = pos - center_pos
@@ -462,7 +493,8 @@ class CornerTeachingTask(object):
                 direction = vec / vec_len
                 pos = pos + direction * self.vision_area_margin
 
-            pos += self.vision_target_offset
+            offset_vec = gravity_compensation_vec
+            pos += offset_vec
             target = Coordinates(pos=pos, rot=base_rot)
 
             av = self._solve_ik(target, self.manual_seed_av)
@@ -488,9 +520,22 @@ class CornerTeachingTask(object):
         if len(self.corners) != 4:
             return
 
+        if not self._check_gravity_initialized():
+            self.av_seq = []
+            return
+
+        # lift_vec = 重力ベクトル * -1 (上向き) * スカラー高さ
+        lift_height = 0.05  # [m]
+        lift_vec = self.gravity_vector * -1.0 * lift_height
+        rospy.loginfo(f"[Plan] Applying Lift Vector: {lift_vec} (based on Gravity)")
+
         # --- 外部から注入された軌道生成関数を使用 ---
         rospy.loginfo(f"Generating trajectory using: {self.trajectory_generator.__name__}")
-        waypoints, seed_avs = self.trajectory_generator(self.corners, self.corner_avs)
+        waypoints, seed_avs = self.trajectory_generator(
+            self.corners,
+            self.corner_avs,
+            lift_offset=lift_vec
+        )
 
         seq = self.solve_full_ik(waypoints, seed_avs)
 
@@ -612,20 +657,25 @@ def main():
 
     try:
         # ==========================================================
-        #  Taskの設定 (ここで動作とプロンプトを指定)
+        #  Taskの設定 (将来的には、人間からの指示をパースして、以下のパラメータを自動で決定する)
         # ==========================================================
         # 例1: デフォルト (木製トレイの汚れ、ジグザグ動作)
         # target_prompt = "wood tray"
-        target_trajectory_func = generate_zigzag_trajectory
-        # target_prompt = "green area"
-        # target_trajectory_func = generate_radial_gathering_trajectory
-        target_prompt = "golden plate"
+        target_prompt = "green area"
+        # target_prompt = "golden plate"
+
+        # target_trajectory_func = generate_zigzag_trajectory
+        target_trajectory_func = generate_radial_gathering_trajectory
+
+        # vision_area_margin = -0.03  # 糊を塗る
+        vision_area_margin = 0.03  # ごみを集める
 
         task = CornerTeachingTask(
             ri,
             robot_model,
             prompt=target_prompt,
-            trajectory_generator=target_trajectory_func
+            trajectory_generator=target_trajectory_func,
+            vision_area_margin=vision_area_margin,
         )
         task.run()
     except Exception as e:
