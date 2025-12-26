@@ -637,51 +637,94 @@ class CornerTeachingTask(object):
                 time.sleep(1.0)
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--namespace", type=str, default="")
-    args = parser.parse_args()
-    rospy.init_node("corner_teaching_task", anonymous=True)
-
-    desc_param = args.namespace + "/robot_description" if is_ros_master_local() else args.namespace + "/robot_description_viz"
+# ==========================================================
+#  Setup Functions
+# ==========================================================
+def setup_robot(namespace):
+    """ロボットモデルの読み込みとインターフェースの初期化を行う"""
+    desc_param = namespace + "/robot_description" if is_ros_master_local() else namespace + "/robot_description_viz"
+    
     if not is_ros_master_local():
         from kxr_models.download_urdf import download_urdf_mesh_files
-        download_urdf_mesh_files(args.namespace)
+        download_urdf_mesh_files(namespace)
 
     robot_model = RobotModel()
     from skrobot.utils.urdf import no_mesh_load_mode
     with no_mesh_load_mode():
         robot_model.load_urdf_from_robot_description(desc_param)
 
-    ri = KXRROSRobotInterface(robot_model, namespace=args.namespace, controller_timeout=60.0)
+    ri = KXRROSRobotInterface(robot_model, namespace=namespace, controller_timeout=60.0)
+    return ri, robot_model
 
+
+def execute_instruction(ri, robot_model, verb, target_object):
+    """指示(SVO)に基づいてパラメータを解決し、タスクを実行する"""
     try:
         # ==========================================================
-        #  Taskの設定 (将来的には、人間からの指示をパースして、以下のパラメータを自動で決定する)
+        #  パラメータの自動解決 (Action Registry)
         # ==========================================================
-        # 例1: デフォルト (木製トレイの汚れ、ジグザグ動作)
-        # target_prompt = "wood tray"
-        target_prompt = "green area"
-        # target_prompt = "golden plate"
+        action_registry = {
+            "clean": {
+                "func": generate_zigzag_trajectory,  # ジグザグに掃除
+                "margin": 0.03,  # ゴミを取りこぼさないよう、認識領域より少し広く取る
+            },
+            "collect": {
+                "func": generate_radial_gathering_trajectory,  # 放射状に集める
+                "margin": 0.03,  # ゴミを取りこぼさないよう、認識領域より少し広く取る
+            },
+            "paint": {
+                "func": generate_zigzag_trajectory,  # ジグザグに塗る
+                "margin": -0.03,  # はみ出さないように、少し狭くする
+            }
+        }
 
-        # target_trajectory_func = generate_zigzag_trajectory
-        target_trajectory_func = generate_radial_gathering_trajectory
+        # 登録されていないVerbが来た場合はエラーを出して終了
+        if verb not in action_registry:
+            valid_verbs = list(action_registry.keys())
+            rospy.logerr(f"Unknown instruction verb: '{verb}'. Supported verbs are: {valid_verbs}")
+            return
 
-        # vision_area_margin = -0.03  # 糊を塗る
-        vision_area_margin = 0.03  # ごみを集める
+        config = action_registry[verb]
+        
+        rospy.loginfo(f"Task Instruction: Verb='{verb}', Object='{target_object}'")
+        rospy.loginfo(f"-> Trajectory: {config['func'].__name__}, Margin: {config['margin']}")
 
+        # ==========================================================
+        #  Taskの起動
+        # ==========================================================
         task = CornerTeachingTask(
             ri,
             robot_model,
-            prompt=target_prompt,
-            trajectory_generator=target_trajectory_func,
-            vision_area_margin=vision_area_margin,
+            prompt=target_object,
+            trajectory_generator=config["func"],
+            vision_area_margin=config["margin"],
         )
         task.run()
+
     except Exception as e:
         rospy.logerr(f"Fatal Error: {e}")
         import traceback
         traceback.print_exc()
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--namespace", type=str, default="")
+    args = parser.parse_args()
+
+    rospy.init_node("corner_teaching_task", anonymous=True)
+
+    # 1. ロボットセットアップ (Setup Phase)
+    ri, robot_model = setup_robot(args.namespace)
+
+    # 2. 指示 (Instruction Phase)
+    # ここを変えるだけで挙動が変わる
+    instruction_verb = "collect"       # 動作
+    instruction_object = "green area" # 対象
+
+    # 3. タスク実行 (Execution Phase)
+    execute_instruction(ri, robot_model, instruction_verb, instruction_object)
+
 
 if __name__ == "__main__":
     main()
