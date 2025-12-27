@@ -606,11 +606,15 @@ class CornerTeachingTask(object):
         is_canceled = False
         # 1クリックで動作をキャンセル
         while not rospy.is_shutdown() and self.ri.is_interpolating():
-            btn = self.wait_for_button_press(valid_buttons=[1], timeout=0.1)
-            if btn == 1:
+            # wait_for_button_pressを使うと、呼び出し毎にフラグがリセットされて
+            # タイミングによってボタン入力を取りこぼします。
+            if self.current_button_state == 1:
+                rospy.loginfo("Button 1 pressed -> Canceling motion")
                 self.ri.cancel_angle_vector()  # 動作をキャンセル
+                self.current_button_state = 0  # 処理したのでリセット
                 is_canceled = True
                 break
+            time.sleep(0.05)
         if is_canceled:
             rospy.loginfo("Play interrupted by user.")
             self.update_display("STOPPED")
@@ -675,7 +679,7 @@ def execute_instruction(ri, robot_model, verb, target_object):
             },
             "collect": {
                 "func": generate_radial_gathering_trajectory,  # 放射状に集める
-                "margin": 0.08,  # ゴミを取りこぼさないよう、認識領域より少し広く取る
+                "margin": 0.05,  # ゴミを取りこぼさないよう、認識領域より少し広く取る
             },
             "paint": {
                 "func": generate_zigzag_trajectory,  # ジグザグに塗る
