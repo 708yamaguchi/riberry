@@ -169,12 +169,13 @@ def generate_radial_gathering_trajectory(corners, corner_avs, step_width=0.03, l
 #  Corner Teaching Task Class
 # ==========================================================
 class CornerTeachingTask(object):
-    def __init__(self, ri, robot_model, prompt, trajectory_generator=None, vision_area_margin=0.0):
+    def __init__(self, ri, robot_model, prompt, vision_strategy, trajectory_generator=None, vision_area_margin=0.0):
         self.ri = ri
         self.robot_model = robot_model
 
         # --- 設定値の受け取り ---
         self.prompt = prompt
+        self.vision_strategy = vision_strategy
         # 軌道生成関数が指定されていなければ、デフォルトのジグザグを使用
         self.trajectory_generator = trajectory_generator if trajectory_generator else generate_zigzag_trajectory
         self.target_speed = 0.15  # [m/s]
@@ -415,8 +416,8 @@ class CornerTeachingTask(object):
             return
 
         # --- 指定されたプロンプトを使用 ---
-        req = VisualPoseRequest(prompt=self.prompt, mode="corners")
-        rospy.loginfo(f"Calling Vision Service... prompt={req.prompt}")
+        req = VisualPoseRequest(prompt=self.prompt, mode="corners", strategy=self.vision_strategy)
+        rospy.loginfo(f"Calling Vision Service... prompt={req.prompt}, strategy='{req.strategy}'")
         self.update_display("Vision\nThinking...")
         rospy.loginfo("Using Manually set Seed AV.")
 
@@ -681,6 +682,11 @@ def execute_instruction(ri, robot_model, verb, target_object):
                 "margin": -0.03,  # はみ出さないように、少し狭くする
             }
         }
+        # デフォルトは segmentation なので、ここに書かれていないものは segmentation になる
+        object_registry = {
+            "pile of screws": "detection",  # ねじの山はDetectionを使う
+            "screws": "detection",          # 念のため
+        }
 
         # 登録されていないVerbが来た場合はエラーを出して終了
         if verb not in action_registry:
@@ -688,10 +694,12 @@ def execute_instruction(ri, robot_model, verb, target_object):
             rospy.logerr(f"Unknown instruction verb: '{verb}'. Supported verbs are: {valid_verbs}")
             return
 
-        config = action_registry[verb]
+        action_config = action_registry[verb]
+        vision_strategy = object_registry.get(target_object, "segmentation")
         
         rospy.loginfo(f"Task Instruction: Verb='{verb}', Object='{target_object}'")
-        rospy.loginfo(f"-> Trajectory: {config['func'].__name__}, Margin: {config['margin']}")
+        rospy.loginfo(f"-> Trajectory: {action_config['func'].__name__}, Margin: {action_config['margin']}")
+        rospy.loginfo(f"-> Vision Strategy: {vision_strategy}")
 
         # ==========================================================
         #  Taskの起動
@@ -700,8 +708,9 @@ def execute_instruction(ri, robot_model, verb, target_object):
             ri,
             robot_model,
             prompt=target_object,
-            trajectory_generator=config["func"],
-            vision_area_margin=config["margin"],
+            vision_strategy=vision_strategy,
+            trajectory_generator=action_config["func"],
+            vision_area_margin=action_config["margin"],
         )
         task.run()
 
@@ -724,7 +733,8 @@ def main():
     # 2. 指示 (Instruction Phase)
     # ここを変えるだけで挙動が変わる
     instruction_verb = "collect"       # 動作
-    instruction_object = "coffee powder"  # 対象
+    # instruction_object = "coffee powder"  # 対象
+    instruction_object = "pile of screws"  # 対象
 
     # 3. タスク実行 (Execution Phase)
     execute_instruction(ri, robot_model, instruction_verb, instruction_object)
