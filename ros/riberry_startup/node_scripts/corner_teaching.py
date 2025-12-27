@@ -70,7 +70,7 @@ def generate_zigzag_trajectory(corners, corner_avs, step_width=0.02, **kwargs):
 
     return waypoints, seed_avs
 
-def generate_radial_gathering_trajectory(corners, corner_avs, step_width=0.02, sweep_ratio=1.0, lift_offset=None, **kwargs):
+def generate_radial_gathering_trajectory(corners, corner_avs, step_width=0.03, lift_offset=None, **kwargs):
     """
     領域の外周（辺）から中心に向かって掃き寄せるような放射状の軌道を生成する。
     戻る動作の際にアームを持ち上げて、次の開始点へ移動する。
@@ -79,7 +79,6 @@ def generate_radial_gathering_trajectory(corners, corner_avs, step_width=0.02, s
         corners (list[Coordinates]): コーナー4点の座標リスト
         corner_avs (list[numpy.ndarray]): コーナー4点の関節角度リスト
         step_width (float): 辺上の刻み幅 [m]
-        sweep_ratio (float): 中心への移動量の割合 (0.0~1.0)
         lift_offset (tuple): 持ち上げ移動時のオフセット (x, y, z) [m]
     """
     p = [c.worldpos() for c in corners]
@@ -120,6 +119,7 @@ def generate_radial_gathering_trajectory(corners, corner_avs, step_width=0.02, s
 
             # --- 中心側の点 (Current Inner) ---
             vec_to_center = center_pos - pos_edge
+            sweep_ratio=1.0  # 中心への移動量の割合 (0.0~1.0)
             pos_inner = pos_edge + vec_to_center * sweep_ratio
             rot_inner = rot_edge # 回転は維持
 
@@ -231,7 +231,8 @@ class CornerTeachingTask(object):
         self.end_coords = make_cascoords(parent=physical_link)
         # ee_offset = (-0.1, 0.0, 0.2)  # 刷毛把持用
         # ee_offset = (-0.12, 0.0, 0.08)  # 糊用グリッパ
-        ee_offset = (0.0, 0.0, 0.08)  # デフォルトグリッパ
+        # ee_offset = (0.0, 0.0, 0.08)  # デフォルトグリッパ
+        ee_offset = (-0.03, 0.0, 0.08)  # 布巾を持つとき（カメラから離した場所が先端になる）
         self.end_coords.translate(ee_offset, wrt="local")
 
         rospy.loginfo(f"Target Physical Link: {physical_link.name}")
@@ -303,6 +304,9 @@ class CornerTeachingTask(object):
             target_coords=target_coords,
             move_target=self.end_coords,
             rotation_axis=True,
+            # rotation_axis=["xyz"],
+            # rotation_axis=["x"],
+            rthre=np.deg2rad(30),
             stop=50,
             revert_if_fail=False
         )
@@ -525,7 +529,7 @@ class CornerTeachingTask(object):
             return
 
         # lift_vec = 重力ベクトル * -1 (上向き) * スカラー高さ
-        lift_height = 0.05  # [m]
+        lift_height = 0.10  # [m]
         lift_vec = self.gravity_vector * -1.0 * lift_height
         rospy.loginfo(f"[Plan] Applying Lift Vector: {lift_vec} (based on Gravity)")
 
@@ -670,7 +674,7 @@ def execute_instruction(ri, robot_model, verb, target_object):
             },
             "collect": {
                 "func": generate_radial_gathering_trajectory,  # 放射状に集める
-                "margin": 0.03,  # ゴミを取りこぼさないよう、認識領域より少し広く取る
+                "margin": 0.05,  # ゴミを取りこぼさないよう、認識領域より少し広く取る
             },
             "paint": {
                 "func": generate_zigzag_trajectory,  # ジグザグに塗る
@@ -720,7 +724,7 @@ def main():
     # 2. 指示 (Instruction Phase)
     # ここを変えるだけで挙動が変わる
     instruction_verb = "collect"       # 動作
-    instruction_object = "green area" # 対象
+    instruction_object = "coffee powder"  # 対象
 
     # 3. タスク実行 (Execution Phase)
     execute_instruction(ri, robot_model, instruction_verb, instruction_object)
