@@ -674,7 +674,7 @@ def execute_instruction(ri, robot_model, verb, target_object):
             },
             "collect": {
                 "func": generate_radial_gathering_trajectory,  # 放射状に集める
-                "margin": 0.05,  # ゴミを取りこぼさないよう、認識領域より少し広く取る
+                "margin": 0.08,  # ゴミを取りこぼさないよう、認識領域より少し広く取る
             },
             "paint": {
                 "func": generate_zigzag_trajectory,  # ジグザグに塗る

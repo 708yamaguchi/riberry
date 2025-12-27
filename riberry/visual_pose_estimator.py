@@ -28,12 +28,14 @@ class Florence2Segmenter:
         rospy.loginfo("Loading Florence-2 Model...")
         try:
             self.model = AutoModelForCausalLM.from_pretrained(
-                "microsoft/Florence-2-base",
+                # "microsoft/Florence-2-base",
+                "microsoft/Florence-2-large-ft",  # Use 'ft' for VQA task
                 torch_dtype=self.torch_dtype,
                 trust_remote_code=True
             ).to(self.device)
             self.processor = AutoProcessor.from_pretrained(
-                "microsoft/Florence-2-base",
+                # "microsoft/Florence-2-base",
+                "microsoft/Florence-2-large-ft",  # Use 'ft' for VQA task
                 trust_remote_code=True
             )
         except Exception as e:
@@ -41,9 +43,59 @@ class Florence2Segmenter:
             raise e
         rospy.loginfo("Florence-2 Loaded.")
 
-    def process_image(self, image_input, prompt):
+    def check_existence(self, image_input, target_name):
+        """
+        VQAタスクを使って物体が存在するかどうかを Yes/No で判定する
+        """
         image = cv2.cvtColor(image_input.copy(), cv2.COLOR_BGR2RGB)
-        task_prompt = "<REFERRING_EXPRESSION_SEGMENTATION>"
+
+        # VQA用のプロンプトを作成
+        # 例: "Is there a screw?" "Are there screws?"
+        task_prompt = "<VQA>"
+        question = f"Is there a {target_name} in this image?"
+        text_input = task_prompt + question
+
+        try:
+            inputs = self.processor(text=text_input, images=image, return_tensors="pt").to(self.device, self.torch_dtype)
+
+            generated_ids = self.model.generate(
+                input_ids=inputs["input_ids"],
+                pixel_values=inputs["pixel_values"],
+                max_new_tokens=1024,
+                do_sample=False,
+                num_beams=3
+            )
+
+            generated_text = self.processor.batch_decode(generated_ids, skip_special_tokens=False)[0]
+
+            # 結果のパース
+            result = self.processor.post_process_generation(
+                generated_text,
+                task=task_prompt,
+                image_size=(image.shape[1], image.shape[0])
+            )
+
+            # Florence-2のVQAは辞書形式ではなく、直接文字列を返すことが多いですが
+            # post_processの結果に合わせて調整してください。
+            # 通常は result['<VQA>'] に "Yes" や "No" が入ります。
+            answer = result.get("<VQA>", "").lower()
+
+            rospy.loginfo(f"VQA Check '{question}' -> '{answer}'")
+
+            # "yes" が含まれていれば存在する
+            return "yes" in answer
+
+        except Exception as e:
+            rospy.logerr(f"VQA failed: {e}")
+            return False
+
+    def process_image(self, image_input, prompt, task_prompt):
+        """
+        画像処理のメイン関数
+        Args:
+            task_prompt: "<OPEN_VOCABULARY_DETECTION>" or "<REFERRING_EXPRESSION_SEGMENTATION>"
+        """
+        image = cv2.cvtColor(image_input.copy(), cv2.COLOR_BGR2RGB)
         text_input = task_prompt + prompt
 
         try:
@@ -69,16 +121,38 @@ class Florence2Segmenter:
             rospy.logerr(f"Segmentation failed: {e}")
             return None
 
-    def create_mask(self, parsed_answer, image_shape):
+    def create_mask(self, parsed_answer, task_prompt, image_shape):
+        """
+        タスクの種類に応じて結果を解析し、マスクを作成する
+        Args:
+            parsed_answer: process_imageの戻り値 (辞書型)
+            task_prompt: 実行したタスクのプロンプト (キーとして使用)
+        """
         mask = np.zeros(image_shape[:2], dtype=np.uint8)
-        if not parsed_answer: return mask
-        results = parsed_answer.get("<REFERRING_EXPRESSION_SEGMENTATION>", {})
+        if not parsed_answer: 
+            return mask
+        
+        # 結果辞書から該当タスクのデータを取り出す
+        results = parsed_answer.get(task_prompt, {})
 
-        for polygon_group in results.get('polygons', []):
-            for coords in polygon_group:
-                points = np.array(coords, dtype=np.int32).reshape(-1, 2)
-                cv2.fillPoly(mask, [points], 255)
+        # --- Detection (OD) の場合 ---
+        if task_prompt == "<OPEN_VOCABULARY_DETECTION>":
+            bboxes = results.get('bboxes', [])
+            for bbox in bboxes:
+                # bbox: [x1, y1, x2, y2]
+                x1, y1, x2, y2 = map(int, bbox)
+                cv2.rectangle(mask, (x1, y1), (x2, y2), 255, -1)
+
+        # --- Segmentation の場合 ---
+        elif task_prompt == "<REFERRING_EXPRESSION_SEGMENTATION>":
+            polygons = results.get('polygons', [])
+            for polygon_group in polygons:
+                for coords in polygon_group:
+                    points = np.array(coords, dtype=np.int32).reshape(-1, 2)
+                    cv2.fillPoly(mask, [points], 255)
+
         return mask
+
 
 class VisualPoseEstimator:
     def __init__(self):
@@ -143,7 +217,7 @@ class VisualPoseEstimator:
                 if self.latest_color is not None and self.latest_depth is not None:
                     # 確実にコピーして返す
                     return self.latest_color.copy(), self.latest_depth.copy()
-            
+
             # まだ来てなければ待つ（ロックを開放してからsleepすることが重要）
             rate.sleep()
 
@@ -151,7 +225,7 @@ class VisualPoseEstimator:
         rospy.logerr("Capture timed out: No new image received.")
         return None, None
 
-    # =========================================================================
+# =========================================================================
     # Service Handler
     # =========================================================================
     def handle_get_position(self, req):
@@ -160,29 +234,57 @@ class VisualPoseEstimator:
         req.mode: "center", "corners"
         """
         target_prompt = req.prompt if req.prompt else "object"
-        mode = req.mode if req.mode else "center"
+        mode = req.mode if req.mode else "corners"
+        strategy = req.strategy if req.strategy else "segmentation" # デフォルト
+        rospy.loginfo(f"Request: '{target_prompt}', Mode: '{mode}', Strategy: '{strategy}'")
 
-        rospy.loginfo(f"Request: '{target_prompt}', Mode: '{mode}'")
+        if "detect" in strategy.lower() or "od" in strategy.lower():
+            task_prompt = "<OPEN_VOCABULARY_DETECTION>"
+            task_display_name = "OD"
+        else:
+            task_prompt = "<REFERRING_EXPRESSION_SEGMENTATION>"
+            task_display_name = "SEG"
 
         # 1. 画像取得
         color, depth = self.capture_snapshot()
         if color is None or self.camera_info_K is None:
             return VisualPoseResponse(success=False, message="No image/camera info", poses=[])
 
-        # 2. セグメンテーション (マスク作成)
-        res = self.segmenter.process_image(color, target_prompt)
-        mask = self.segmenter.create_mask(res, color.shape)
+        # --- 1. まずVQAで存在確認 ---
+        exists = self.segmenter.check_existence(color, target_prompt)
+        if not exists:
+             msg_str = f"Object '{target_prompt}' not found (VQA check)."
+             rospy.logwarn(msg_str)
+             empty_mask = np.zeros(color.shape[:2], dtype=np.uint8)
+             self.publish_debug_image(
+                 color, empty_mask, [], mode, 
+                 prompt_text=target_prompt, 
+                 status_msg="Not Found (VQA)"
+             )
+             return VisualPoseResponse(success=False, message=msg_str, poses=[])
+
+         # 4. モデル実行 (process_image に task_prompt を渡す)
+        rospy.loginfo(f"Executing task: {task_display_name} ({task_prompt})")
+        result = self.segmenter.process_image(color, target_prompt, task_prompt)
+        mask = self.segmenter.create_mask(result, task_prompt, color.shape)
 
         if np.count_nonzero(mask) == 0:
-             return VisualPoseResponse(success=False, message=f"Object '{target_prompt}' not found.", poses=[])
+             msg_str = f"Object '{target_prompt}' not found (Empty mask)."
+             
+             # 空のマスクですが画像を表示し、メッセージを表示してPublish
+             self.publish_debug_image(
+                 color, mask, [], mode, 
+                 prompt_text=target_prompt, 
+                 status_msg="Not Found (Empty Mask)"
+             )
+             
+             return VisualPoseResponse(success=False, message=msg_str, poses=[])
 
         # 3. モード別処理
-        points_3d = []  # [(x,y,z), ...]
+        points_3d = []
         msg = ""
         success = False
-        
-        # 描画用データ保持のため
-        self.last_approx_corners = None 
+        self.last_approx_corners = None
 
         if mode == "center":
             pt, msg = self.calculate_center(mask, depth)
@@ -194,13 +296,14 @@ class VisualPoseEstimator:
             pts, approx_poly, msg = self.calculate_corners(mask, depth)
             if pts:
                 points_3d = pts
-                self.last_approx_corners = approx_poly # 可視化用
+                self.last_approx_corners = approx_poly
                 success = True
 
         else:
             return VisualPoseResponse(success=False, message=f"Unknown mode: {mode}", poses=[])
 
         if not success:
+             # 計算失敗時も画像を出したい場合はここにも追加可能
              return VisualPoseResponse(success=False, message=msg, poses=[])
 
         # 4. レスポンス作成
@@ -210,21 +313,25 @@ class VisualPoseEstimator:
             p.position.x = x
             p.position.y = y
             p.position.z = z
-            p.orientation.w = 1.0 
+            p.orientation.w = 1.0
             pose_list.append(p)
 
         pts_str = ", ".join([f"({p[0]:.2f}, {p[1]:.2f}, {p[2]:.2f})" for p in points_3d])
         rospy.loginfo(f"Result [{mode}]: {pts_str}")
 
-        # 5. 可視化
-        self.publish_debug_image(color, mask, points_3d, mode, self.last_approx_corners, prompt_text=target_prompt)
+        # 5. 可視化 (成功時: status_msgは空または"Found"など)
+        self.publish_debug_image(
+            color, mask, points_3d, mode, 
+            self.last_approx_corners, 
+            prompt_text=target_prompt,
+            status_msg="Found (VQA)"
+        )
 
         return VisualPoseResponse(success=True, message=f"Found {len(points_3d)} points.", poses=pose_list)
 
     # =========================================================================
     # Calculation Logic
     # =========================================================================
-
     def get_representative_depth(self, mask, depth_img):
         """
         マスク領域全体の深度中央値を取得（フォールバック用）
@@ -272,33 +379,33 @@ class VisualPoseEstimator:
 
         # 最大の領域を取得
         largest_contour = max(contours, key=cv2.contourArea)
-        
+
         # --- 変更ここから ---
-        
+
         # 1. 形状をきれいにするために凸包(Convex Hull)を取得
         # これにより、凹みノイズを除去し、綺麗な多角形にしやすくします
         hull = cv2.convexHull(largest_contour)
 
         # 2. 多角形近似を行い、頂点が4つになるパラメータを探す
         box_points = None
-        
+
         # 許容誤差(epsilon)を少しずつ大きくしながら、ちょうど4点になる場所を探す
         # 周長の1%から始めて、最大10%まで試行
         for factor in np.linspace(0.01, 0.1, 10):
             epsilon = factor * cv2.arcLength(hull, True)
             approx = cv2.approxPolyDP(hull, epsilon, True)
-            
+
             if len(approx) == 4:
                 # (N, 1, 2) -> (N, 2) に形状変換
                 box_points = approx.reshape(-1, 2)
                 break
-        
+
         # もしうまく4点が見つからなかった場合(円形に近い、ノイズが多い等)のフォールバック
         if box_points is None:
             # 仕方がないので従来のminAreaRectを使う（あるいはエラーにする）
             rect = cv2.minAreaRect(largest_contour)
             box_points = np.int0(cv2.boxPoints(rect))
-        
+
         # 頂点の順序を整列させる（オプション）
         # 左上、右上、右下、左下 の順などに揃えたい場合はここでソート処理を入れると良いです
         # 今回は検出順のまま進めます
@@ -310,7 +417,7 @@ class VisualPoseEstimator:
         if fallback_z is None: fallback_z = 0.0
 
         points_3d = []
-        
+
         for point in box_points:
             u, v = point
 
@@ -337,44 +444,46 @@ class VisualPoseEstimator:
     # =========================================================================
     # Visualization
     # =========================================================================
-    def publish_debug_image(self, color, mask, points_3d, mode, approx_poly=None, prompt_text=""):
+    def publish_debug_image(self, color, mask, points_3d, mode, approx_poly=None, prompt_text="", status_msg=""):
         if not self.visualize:
             return
 
         vis_img = color.copy()
 
-        # マスクの半透明表示
-        colored_mask = np.zeros_like(vis_img)
-        colored_mask[mask > 0] = [0, 255, 0]
-        vis_img = cv2.addWeighted(vis_img, 0.7, colored_mask, 0.3, 0)
+        # マスクの半透明表示（マスクがある場合のみ）
+        if np.count_nonzero(mask) > 0:
+            colored_mask = np.zeros_like(vis_img)
+            colored_mask[mask > 0] = [0, 255, 0]
+            vis_img = cv2.addWeighted(vis_img, 0.7, colored_mask, 0.3, 0)
 
+        # --- テキスト描画 (プロンプト) ---
         text_str = f"Prompt: {prompt_text}"
-        cv2.putText(vis_img, text_str, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 3) # 縁取り(黒)
-        cv2.putText(vis_img, text_str, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2) # 本体(黄色)
+        cv2.putText(vis_img, text_str, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 3)
+        cv2.putText(vis_img, text_str, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
 
+        # --- テキスト描画 (ステータスメッセージ: Not Foundなど) ---
+        if status_msg:
+            # プロンプトの下(y=70あたり)に赤色で表示
+            cv2.putText(vis_img, status_msg, (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 3)
+            cv2.putText(vis_img, status_msg, (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2) # 赤
+
+        # --- 成功時の描画 (座標など) ---
         if mode == "center" and points_3d:
              M = cv2.moments(mask)
-             cx, cy = int(M["m10"]/M["m00"]), int(M["m01"]/M["m00"])
-             cv2.circle(vis_img, (cx, cy), 8, (0, 0, 255), -1)
-             text = f"({points_3d[0][0]:.2f}, {points_3d[0][1]:.2f}, {points_3d[0][2]:.2f})m"
-             cv2.putText(vis_img, text, (cx-60, cy-15), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 2)
+             if M["m00"] != 0:
+                cx, cy = int(M["m10"]/M["m00"]), int(M["m01"]/M["m00"])
+                cv2.circle(vis_img, (cx, cy), 8, (0, 0, 255), -1)
+                text = f"({points_3d[0][0]:.2f}, {points_3d[0][1]:.2f}, {points_3d[0][2]:.2f})m"
+                cv2.putText(vis_img, text, (cx-60, cy-15), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 2)
 
         elif mode == "corners" and points_3d and approx_poly is not None:
             cv2.drawContours(vis_img, [approx_poly], -1, (0, 0, 255), 2)
-            # 各頂点に3次元座標を表示
             for i, point in enumerate(approx_poly):
-                # u, v = point[0]
                 u, v = point.flatten()
                 if i < len(points_3d):
                     x, y, z = points_3d[i]
-                    
-                    # 点を描画
-                    cv2.circle(vis_img, (u, v), 6, (255, 0, 0), -1) # 青丸
-                    
-                    # テキスト生成
+                    cv2.circle(vis_img, (u, v), 6, (255, 0, 0), -1)
                     label = f"P{i}: ({x:.2f}, {y:.2f}, {z:.2f})"
-                    
-                    # 文字が見やすいように縁取りと本体を描画
                     cv2.putText(vis_img, label, (u+10, v-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,0), 3)
                     cv2.putText(vis_img, label, (u+10, v-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,255), 1)
 
@@ -383,6 +492,7 @@ class VisualPoseEstimator:
             self.debug_pub.publish(msg)
         except Exception as e:
             rospy.logwarn(f"Debug pub failed: {e}")
+
 
 if __name__ == "__main__":
     rospy.init_node("visual_pose_estimator")

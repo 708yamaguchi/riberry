@@ -1,6 +1,7 @@
 # Request
 string prompt
 string mode       # "center", "corners" など (デフォルトは "center")
+string strategy   # "segmentation", "detection" (デフォルトは "segmentation")
 ---
 # Response
 bool success
