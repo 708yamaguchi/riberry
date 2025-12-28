@@ -167,6 +167,7 @@ class VisualPoseEstimator:
         self.lock = threading.Lock()
         self.latest_color = None
         self.latest_depth = None
+        self.latest_header = None
         self.camera_info_K = None
 
         # --- Subscribers ---
@@ -198,6 +199,7 @@ class VisualPoseEstimator:
             try:
                 self.latest_color = self.bridge.imgmsg_to_cv2(color_msg, "bgr8")
                 self.latest_depth = self.bridge.imgmsg_to_cv2(depth_msg, "passthrough")
+                self.latest_header = color_msg.header
             except Exception as e:
                 rospy.logerr(f"Image conversion error: {e}")
 
@@ -206,6 +208,7 @@ class VisualPoseEstimator:
         with self.lock:
             self.latest_color = None
             self.latest_depth = None
+            self.latest_header = None
 
         # 2. 新しい画像が来るのを待つ
         start_time = time.time()
@@ -216,14 +219,14 @@ class VisualPoseEstimator:
                 # 画像がセットされたか確認
                 if self.latest_color is not None and self.latest_depth is not None:
                     # 確実にコピーして返す
-                    return self.latest_color.copy(), self.latest_depth.copy()
+                    return self.latest_color.copy(), self.latest_depth.copy(), self.latest_header
 
             # まだ来てなければ待つ（ロックを開放してからsleepすることが重要）
             rate.sleep()
 
         # 3. タイムアウトした場合
         rospy.logerr("Capture timed out: No new image received.")
-        return None, None
+        return None, None, None
 
 # =========================================================================
     # Service Handler
@@ -246,8 +249,8 @@ class VisualPoseEstimator:
             task_display_name = "SEG"
 
         # 1. 画像取得
-        color, depth = self.capture_snapshot()
-        if color is None or self.camera_info_K is None:
+        color, depth, header = self.capture_snapshot()
+        if color is None or self.camera_info_K is None or header is None:
             return VisualPoseResponse(success=False, message="No image/camera info", poses=[])
 
         # --- 1. まずVQAで存在確認 ---
@@ -257,7 +260,7 @@ class VisualPoseEstimator:
              rospy.logwarn(msg_str)
              empty_mask = np.zeros(color.shape[:2], dtype=np.uint8)
              self.publish_debug_image(
-                 color, empty_mask, [], mode, 
+                 color, empty_mask, [], mode, header,
                  prompt_text=target_prompt, 
                  status_msg="Not Found (VQA)"
              )
@@ -273,7 +276,7 @@ class VisualPoseEstimator:
              
              # 空のマスクですが画像を表示し、メッセージを表示してPublish
              self.publish_debug_image(
-                 color, mask, [], mode, 
+                 color, mask, [], mode, header,
                  prompt_text=target_prompt, 
                  status_msg="Not Found (Empty Mask)"
              )
@@ -321,8 +324,8 @@ class VisualPoseEstimator:
 
         # 5. 可視化 (成功時: status_msgは空または"Found"など)
         self.publish_debug_image(
-            color, mask, points_3d, mode, 
-            self.last_approx_corners, 
+            color, mask, points_3d, mode, header,
+            approx_poly=self.last_approx_corners, 
             prompt_text=target_prompt,
             status_msg="Found (VQA)"
         )
@@ -444,7 +447,7 @@ class VisualPoseEstimator:
     # =========================================================================
     # Visualization
     # =========================================================================
-    def publish_debug_image(self, color, mask, points_3d, mode, approx_poly=None, prompt_text="", status_msg=""):
+    def publish_debug_image(self, color, mask, points_3d, mode, header_info, approx_poly=None, prompt_text="", status_msg=""):
         if not self.visualize:
             return
 
@@ -489,6 +492,7 @@ class VisualPoseEstimator:
 
         try:
             msg = self.bridge.cv2_to_imgmsg(vis_img, encoding="bgr8")
+            msg.header = header_info
             self.debug_pub.publish(msg)
         except Exception as e:
             rospy.logwarn(f"Debug pub failed: {e}")
