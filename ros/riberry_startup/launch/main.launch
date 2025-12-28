@@ -1,0 +1,15 @@
+<launch>
+
+  <arg name="task_config_path" value="$(find riberry_startup)/config/task_config.json" />
+
+  <include file="$(find riberry_startup)/launch/visual_pose_estimator.launch" />
+
+  <node pkg="riberry_startup" type="corner_teaching.py" name="corner_teaching" output="screen">
+    <param name="task_config_path" value="$(arg task_config_path)" />
+  </node>
+
+  <node pkg="riberry_startup" type="task_parser_node.py" name="task_parser" output="screen">
+    <param name="task_config_path" value="$(arg task_config_path)" />
+  </node>
+
+</launch>

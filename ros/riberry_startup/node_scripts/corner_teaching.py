@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import argparse
+import json
 import time
 import math
 import numpy as np
@@ -18,12 +19,10 @@ from skrobot.coordinates.math import interpolate_rotation_matrices, quaternion2m
 
 from kxr_controller.check_ros_master import is_ros_master_local
 from kxr_controller.kxr_interface import KXRROSRobotInterface
+from kxr_controller.msg import ServoOnOff
 
-try:
-    from riberry_startup.srv import VisualPose, VisualPoseRequest
-except ImportError:
-    rospy.logwarn("VisualPose service definition not found.")
-    VisualPose = None
+from riberry_startup.srv import VisualPose, VisualPoseRequest
+from riberry_startup.srv import TaskInstruction, TaskInstructionResponse
 
 
 # ==========================================================
@@ -169,17 +168,33 @@ def generate_radial_gathering_trajectory(corners, corner_avs, step_width=0.03, l
 #  Corner Teaching Task Class
 # ==========================================================
 class CornerTeachingTask(object):
-    def __init__(self, ri, robot_model, prompt, vision_strategy, trajectory_generator=None, vision_area_margin=0.0):
+    def __init__(self, ri, robot_model):
         self.ri = ri
         self.robot_model = robot_model
 
-        # --- 設定値の受け取り ---
-        self.prompt = prompt
-        self.vision_strategy = vision_strategy
-        # 軌道生成関数が指定されていなければ、デフォルトのジグザグを使用
-        self.trajectory_generator = trajectory_generator if trajectory_generator else generate_zigzag_trajectory
-        self.target_speed = 0.15  # [m/s]
-        self.min_time_step = 0.3
+        # --- 設定ファイルの読み込み ---
+        config_path = rospy.get_param("~task_config_path")
+        rospy.loginfo(f"Loading task config from: {config_path}")
+        try:
+            with open(config_path, 'r', encoding='utf-8') as f:
+                self.config = json.load(f)
+        except Exception as e:
+            rospy.logerr(f"Failed to load config file: {e}")
+            exit(1)
+        
+        self.requested_from_service = False
+
+        # --- 現在のタスクパラメータ (動的に変わる) ---
+        self.current_task_params = None
+        # --- ロボット動作の固定パラメータ (Const Params) ---
+        # 変化しない設定値をここに集約します
+        self.const_params = {
+            "target_speed": 0.15,           # [m/s]
+            "min_time_step": 0.3,           # [s]
+            "error_tolerance": 0.02,        # [m] IK許容誤差
+            "gravity_comp_offset": 0.02,    # [m] Vision認識時の重力補正高さ
+            "lift_height": 0.10             # [m] 移動時の持ち上げ高さ
+        }
 
         # --- TF初期化 ---
         self.tf_listener = tf.TransformListener()
@@ -190,9 +205,20 @@ class CornerTeachingTask(object):
         self.pub_display = rospy.Publisher("/atom_s3_additional_info", String, queue_size=1)
         rospy.Subscriber("/atom_s3_mode", String, self._cb_atom_mode)
         rospy.Subscriber("/atom_s3_button_state", Int32, self._cb_atom_button)
-
         self.atom_mode = ""
         self.current_button_state = 0
+
+        self.servo_on_states = None
+        ns = self.ri.namespace if self.ri.namespace else ""
+        servo_topic = ns + "fullbody_controller/servo_on_off_real_interface/state"
+        rospy.Subscriber(servo_topic, ServoOnOff, self._cb_servo_on_states, queue_size=1)
+
+        self.srv_server = rospy.Service(
+            '/task_instruction', 
+            TaskInstruction, 
+            self._cb_task_instruction
+        )
+        rospy.loginfo("Service /task_instruction is ready.")
 
         # --- 保存データ ---
         self.corners = []
@@ -201,18 +227,10 @@ class CornerTeachingTask(object):
         self.times = []
         self.manual_seed_av = None
 
-        # --- IK設定値 ---
-        self.error_tolerance = 0.02  # IK許容誤差[m]
-
         # --- IMUと重力関連 ---
         # 重力ベクトル (初期値はとりあえずZ下向きと仮定)
         self.gravity_vector = None
         rospy.Subscriber("/imu", Imu, self._cb_imu)
-
-        # [Vision Mode Only] 画像認識時のみ使用するパラメータ[m]
-        # 画像認識時の補正高さ (重力の逆方向にこの距離だけオフセット)
-        self.gravity_compensation_offset = 0.02
-        self.vision_area_margin = vision_area_margin
 
         # --- リンク設定 ---
         self._setup_kinematics()
@@ -276,6 +294,85 @@ class CornerTeachingTask(object):
             time.sleep(0.05)
         return None
 
+    def _cb_servo_on_states(self, msg):
+        self.servo_on_states = msg
+
+    def toggle_servo_on_off(self):
+        """
+        If one of the servos is on, turn the entire servo off.
+        If all of the servos is off, turn the entire servo on.
+        """
+        if self.ri is None:
+            rospy.logwarn("KXRROSRobotInterface instance is not created.")
+            return
+        if self.servo_on_states is None:
+            rospy.logwarn("Servo states not received yet.")
+            return
+            
+        servo_on_states = self.servo_on_states.servo_on_states
+        if any(servo_on_states) is True:
+            rospy.loginfo("Toggle: Servo OFF")
+            self.ri.servo_off()
+            self.update_display("Servo OFF")
+        else:
+            rospy.loginfo("Toggle: Servo ON")
+            self.ri.servo_on()
+            self.update_display("Servo ON")
+        time.sleep(1.0) # チャタリング防止
+
+    # ==========================================================
+    #  Service Callback (Updated)
+    # ==========================================================
+    def _cb_task_instruction(self, req):
+        """外部からのタスク指示を受信して設定を更新し、実行フラグを立てる"""
+        rospy.loginfo(f"Task Request Received: {req.action_verb} {req.target_object}")
+        
+        action_registry = self.config.get("action_registry", {})
+        object_registry = self.config.get("object_registry", {})
+
+        # 1. バリデーション
+        if req.action_verb not in action_registry:
+            msg = f"Unknown verb: {req.action_verb}"
+            rospy.logerr(msg)
+            return TaskInstructionResponse(success=False, message=msg)
+
+        if req.target_object not in object_registry:
+            msg = f"Unknown target: {req.target_object}"
+            rospy.logerr(msg)
+            return TaskInstructionResponse(success=False, message=msg)
+
+        # 2. 関数マッピング
+        func_map = {
+            "zigzag": generate_zigzag_trajectory,
+            "radial": generate_radial_gathering_trajectory
+        }
+        
+        action_data = action_registry[req.action_verb]
+        traj_type = action_data["trajectory_type"]
+        trajectory_func = func_map.get(traj_type)
+        
+        self.current_task_params = {
+            "prompt": req.target_object,
+            "vision_strategy": object_registry[req.target_object],
+            "vision_area_margin": action_data["margin"],
+            "trajectory_generator": trajectory_func,
+            "repeat_count": req.repeat_value,
+            "repeat_unit": req.repeat_unit
+        }
+
+        # 状態リセット
+        self.corners = []
+        self.av_seq = []
+        # self.manual_seed_av = None # シードは再利用したいのでリセットしない
+
+        # --- 追加: 自動実行フラグをONにする ---
+        self.requested_from_service = True
+
+        self.update_display(f"New Task:\n{req.target_object}")
+        rospy.loginfo("Task accepted. Automation sequence initiated.")
+
+        return TaskInstructionResponse(success=True, message="Task accepted. Starting automation.")
+
     # ==========================================================
     #  Helper: 共通処理 (TF変換 / IK計算)
     # ==========================================================
@@ -317,7 +414,7 @@ class CornerTeachingTask(object):
 
         if is_success:
             return self.robot_model.angle_vector()
-        elif dist_err < self.error_tolerance:
+        elif dist_err < self.const_params["error_tolerance"]:
             return self.robot_model.angle_vector()
         else:
             return None
@@ -333,17 +430,36 @@ class CornerTeachingTask(object):
     # ==========================================================
     #  Teach Mode Entry
     # ==========================================================
-    def teach_mode_entry(self):
-        self.update_display("1clk:Manual\n2clk:Vision")
-        btn = self.wait_for_button_press(valid_buttons=[1, 2])
+    def manual_mode_entry(self):
+        """マニュアルモード: Teach(1) か Play(2) を選択"""
+        while not rospy.is_shutdown():
+            # 計画が存在する場合のみ Play を表示・選択可能にする
+            if self.av_seq:
+                # ユーザー要望に合わせて改行を入れる
+                self.update_display("Manual\n1: Teach\n2: Play")
+                valid_btns = [1, 2, 3]
+            else:
+                self.update_display("Manual\n1: Teach")
+                valid_btns = [1, 3]
 
-        if btn == 1:
-            rospy.loginfo("Input: 1 -> Manual Mode")
-            self.teach_corners_manual()
-        elif btn == 2:
-            rospy.loginfo("Input: 2 -> Vision Mode")
-            self.teach_corners_vision(long_side_stroke=True)
+            btn = self.wait_for_button_press(valid_buttons=valid_btns, timeout=0.5)
 
+            if btn == 1:
+                rospy.loginfo("Manual: Teach Start")
+                self.teach_corners_manual()
+                # Teachが終わったらループを継続し、Playが表示されるようにする
+            elif btn == 2:
+                rospy.loginfo("Manual: Play Start")
+                self.execute_motion()
+                # Playが終わったらループを抜けてメインメニュー（最初の画面）に戻る
+                # これにより、ボタン3でServo ON/OFFができるようになる
+                rospy.loginfo("Play finished, returning to main menu.")
+                break
+            elif btn == 3:
+                # 戻る
+                rospy.loginfo("Exit Manual Mode")
+                break
+    
     # ==========================================================
     #  Manual Teaching
     # ==========================================================
@@ -352,6 +468,9 @@ class CornerTeachingTask(object):
         temp_avs = []
 
         rospy.loginfo("Start Manual Teaching: Servo OFF")
+        self.trajectory_generator = generate_zigzag_trajectory
+        rospy.loginfo("Manual Mode: Force trajectory type to 'zigzag'")
+
         self.ri.servo_off()
 
         for i in range(4):
@@ -371,30 +490,39 @@ class CornerTeachingTask(object):
         self.update_display("Manual Done\nWait")
         rospy.loginfo("Manual Teaching finished. Keeping Servo OFF.")
 
-        self.set_corners_and_plan(temp_corners, temp_avs)
+        self.set_corners_and_plan(
+            temp_corners, 
+            temp_avs, 
+            trajectory_generator=generate_zigzag_trajectory
+        )
 
     # ==========================================================
     #  Vision Teaching
     # ==========================================================
+    def set_vision_seed(self):
+        rospy.loginfo("Setting IK Seed for Vision...")
+        # 呼ばれた瞬間の姿勢をシードとして保存
+        self.manual_seed_av = self.ri.angle_vector()
+        
+        rospy.loginfo("Manual seed_av captured.")
+        self.update_display("Seed Saved!")
+        time.sleep(1.5)
+
     def teach_corners_vision(self, long_side_stroke=True):
-        self.ri.servo_off()
-        while not rospy.is_shutdown():
-            # Seed未設定時はStart(1)を押せないように制御
-            if self.manual_seed_av is None:
-                self.update_display("Need Seed\n2:Set Seed")
-                valid_btns = [2]  # ボタン2のみ有効
-            else:
-                self.update_display("Ready\n1:Start 2:ReSeed")
-                valid_btns = [1, 2] # 両方有効
-            btn = self.wait_for_button_press(valid_buttons=valid_btns, timeout=1.0)
-            if btn == 2:
-                self.manual_seed_av = self.ri.angle_vector()
-                rospy.loginfo("Manual seed_av captured.")
-                self.update_display("Seed Saved!")
-                time.sleep(1.0)
-                continue
-            elif btn == 1:
-                break
+        """
+        Visionによるコーナー検出とIK計算を行う。
+        ボタン操作は排除し、実行可能かどうかの判定と処理のみ行う。
+        """
+        # シードがない場合は失敗
+        if self.manual_seed_av is None:
+            rospy.logerr("Seed AV is not set. Please set seed manually first.")
+            return False
+
+        if self.current_task_params is None:
+            rospy.logerr("No task parameters set.")
+            return False
+        params = self.current_task_params # 短い名前でアクセス
+
         rospy.loginfo("Vision Mode: Servo ON. Starting countdown.")
         self.ri.servo_on()
 
@@ -405,7 +533,6 @@ class CornerTeachingTask(object):
             time.sleep(1.0)
 
         self.update_display("Vision\nCapture!")
-        rospy.loginfo("Capturing now...")
 
         try:
             rospy.wait_for_service("/estimate_corners", timeout=5.0)
@@ -416,7 +543,11 @@ class CornerTeachingTask(object):
             return
 
         # --- 指定されたプロンプトを使用 ---
-        req = VisualPoseRequest(prompt=self.prompt, mode="corners", strategy=self.vision_strategy)
+        req = VisualPoseRequest(
+            prompt=params["prompt"], 
+            mode="corners", 
+            strategy=params["vision_strategy"]
+        )
         rospy.loginfo(f"Calling Vision Service... prompt={req.prompt}, strategy='{req.strategy}'")
         self.update_display("Vision\nThinking...")
         rospy.loginfo("Using Manually set Seed AV.")
@@ -487,7 +618,7 @@ class CornerTeachingTask(object):
         if not self._check_gravity_initialized():
             return
 
-        gravity_compensation_vec = self.gravity_vector * -1.0 * self.gravity_compensation_offset
+        gravity_compensation_vec = self.gravity_vector * -1.0 * self.const_params["gravity_comp_offset"]
         rospy.loginfo(f"[Vision] Applying Gravity Compensation Vector: {gravity_compensation_vec}")
 
         for i, raw_coord in enumerate(base_coords_list):
@@ -496,7 +627,7 @@ class CornerTeachingTask(object):
             vec_len = np.linalg.norm(vec)
             if vec_len > 1e-6:
                 direction = vec / vec_len
-                pos = pos + direction * self.vision_area_margin
+                pos = pos + direction * params["vision_area_margin"]
 
             offset_vec = gravity_compensation_vec
             pos += offset_vec
@@ -513,12 +644,21 @@ class CornerTeachingTask(object):
 
         rospy.loginfo("All vision corners processed.")
         self.update_display("Vision Done\nWait")
-        self.set_corners_and_plan(temp_corners, temp_avs)
+        self.set_corners_and_plan(
+            temp_corners, 
+            temp_avs, 
+            trajectory_generator=params["trajectory_generator"]
+        )
+
+        if self.av_seq:
+            return True
+        else:
+            return False
 
     # ==========================================================
     #  Planning & Execution
     # ==========================================================
-    def set_corners_and_plan(self, corners, avs):
+    def set_corners_and_plan(self, corners, avs, trajectory_generator):
         self.corners = corners
         self.corner_avs = avs
 
@@ -530,13 +670,13 @@ class CornerTeachingTask(object):
             return
 
         # lift_vec = 重力ベクトル * -1 (上向き) * スカラー高さ
-        lift_height = 0.10  # [m]
+        lift_height = self.const_params["lift_height"]
         lift_vec = self.gravity_vector * -1.0 * lift_height
         rospy.loginfo(f"[Plan] Applying Lift Vector: {lift_vec} (based on Gravity)")
 
         # --- 外部から注入された軌道生成関数を使用 ---
         rospy.loginfo(f"Generating trajectory using: {self.trajectory_generator.__name__}")
-        waypoints, seed_avs = self.trajectory_generator(
+        waypoints, seed_avs = trajectory_generator(
             self.corners,
             self.corner_avs,
             lift_offset=lift_vec
@@ -554,6 +694,8 @@ class CornerTeachingTask(object):
         self.times = []
         # 最初の点は、開始姿勢(av_seq[0])へ移動済みとして、短い時間または0を入れる
         self.times.append(1.0)
+        target_speed = self.const_params["target_speed"]
+        min_time_step = self.const_params["min_time_step"]
         # 2点目以降の時間を計算
         for i in range(1, len(waypoints)):
             # 前回の座標と今回の座標の距離を計算
@@ -562,12 +704,12 @@ class CornerTeachingTask(object):
             dist = np.linalg.norm(pos_curr - pos_prev)
             # 時間 = 距離 / 速度
             # ただしゼロ割防止と、回転のみの動作考慮で最小時間を設ける
-            dt = max(self.min_time_step, dist / self.target_speed)
+            dt = max(min_time_step, dist / target_speed)
             self.times.append(dt)
 
         # 合計時間をログ表示
         total_time = sum(self.times)
-        rospy.loginfo(f"Plan ready. Total waypoints: {len(self.av_seq)}, Est. Duration: {total_time:.1f}s, Speed: {self.target_speed}m/s")
+        rospy.loginfo(f"Plan ready. Total waypoints: {len(self.av_seq)}, Est. Duration: {total_time:.1f}s, Speed: {target_speed}m/s")
 
     def solve_full_ik(self, waypoints, seed_avs):
         rospy.loginfo("Solving IK for full trajectory...")
@@ -630,20 +772,53 @@ class CornerTeachingTask(object):
         self.update_display("Done")
 
     def run(self):
-        rospy.loginfo("Task Node Ready.")
+        rospy.loginfo("Task Node Ready. Waiting for commands...")
+        self.update_display("Wait Task...")
+        
         while not rospy.is_shutdown():
-            self.update_display("1:Teach\n2:Play\n3:Free")
-            btn = self.wait_for_button_press(timeout=1.0)
+            # ==========================================
+            # 1. サービスからのリクエスト処理 (自動実行)
+            # ==========================================
+            if self.requested_from_service:
+                self.requested_from_service = False
+                rospy.loginfo(">>> Starting Service Requested Sequence <<<")
+                
+                # シードが設定されていない場合はエラーで弾く
+                if self.manual_seed_av is None:
+                    rospy.logerr("Cannot start auto task: Seed AV is not set.")
+                    self.update_display("Err:No Seed")
+                    time.sleep(1.0)
+                    continue
 
-            if btn == 1:
-                self.teach_mode_entry()
-            elif btn == 2:
-                self.execute_motion()
-            elif btn == 3:
-                rospy.loginfo("Servo OFF (Free Mode)")
-                self.update_display("Free\nMode")
-                self.ri.servo_off()
+                # Vision認識 & 計画 (成功すればTrue)
+                success = self.teach_corners_vision(long_side_stroke=True)
+                
+                # 計画があれば実行
+                if success and self.av_seq:
+                    self.execute_motion()
+                    self.update_display("Auto Task\nFinished")
+                else:
+                    rospy.logwarn("Auto Task Failed (Vision or IK Error)")
+                    self.update_display("Task Fail")
+                
                 time.sleep(1.0)
+                # 自動実行後はループ先頭に戻り、次の指示やボタン入力を待つ
+                continue
+
+            # ==========================================
+            # 2. ユーザーインターフェース (ボタン待ち)
+            # ==========================================
+            self.update_display("Wait for task\n1:Manual\n2:Set seed\n3:Servo ON/OFF")
+            btn = self.wait_for_button_press(valid_buttons=[1, 2, 3], timeout=0.5)
+            if btn == 1:
+                # マニュアルモード (手動教示 or 手動再生)
+                self.manual_mode_entry()
+            elif btn == 2:
+                # Vision用 IKシード設定
+                self.set_vision_seed()
+            elif btn == 3:
+                # サーボ ON/OFF 切り替え
+                self.toggle_servo_on_off()
 
 
 # ==========================================================
@@ -666,82 +841,20 @@ def setup_robot(namespace):
     return ri, robot_model
 
 
-def execute_instruction(ri, robot_model, verb, target_object):
-    """指示(SVO)に基づいてパラメータを解決し、タスクを実行する"""
-    try:
-        # ==========================================================
-        #  パラメータの自動解決 (Action Registry)
-        # ==========================================================
-        action_registry = {
-            "clean": {
-                "func": generate_zigzag_trajectory,  # ジグザグに掃除
-                "margin": 0.03,  # ゴミを取りこぼさないよう、認識領域より少し広く取る
-            },
-            "collect": {
-                "func": generate_radial_gathering_trajectory,  # 放射状に集める
-                "margin": 0.05,  # ゴミを取りこぼさないよう、認識領域より少し広く取る
-            },
-            "paint": {
-                "func": generate_zigzag_trajectory,  # ジグザグに塗る
-                "margin": -0.03,  # はみ出さないように、少し狭くする
-            }
-        }
-        # デフォルトは segmentation なので、ここに書かれていないものは segmentation になる
-        object_registry = {
-            "pile of screws": "detection",  # ねじの山はDetectionを使う
-            "screws": "detection",          # 念のため
-        }
-
-        # 登録されていないVerbが来た場合はエラーを出して終了
-        if verb not in action_registry:
-            valid_verbs = list(action_registry.keys())
-            rospy.logerr(f"Unknown instruction verb: '{verb}'. Supported verbs are: {valid_verbs}")
-            return
-
-        action_config = action_registry[verb]
-        vision_strategy = object_registry.get(target_object, "segmentation")
-        
-        rospy.loginfo(f"Task Instruction: Verb='{verb}', Object='{target_object}'")
-        rospy.loginfo(f"-> Trajectory: {action_config['func'].__name__}, Margin: {action_config['margin']}")
-        rospy.loginfo(f"-> Vision Strategy: {vision_strategy}")
-
-        # ==========================================================
-        #  Taskの起動
-        # ==========================================================
-        task = CornerTeachingTask(
-            ri,
-            robot_model,
-            prompt=target_object,
-            vision_strategy=vision_strategy,
-            trajectory_generator=action_config["func"],
-            vision_area_margin=action_config["margin"],
-        )
-        task.run()
-
-    except Exception as e:
-        rospy.logerr(f"Fatal Error: {e}")
-        import traceback
-        traceback.print_exc()
-
-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--namespace", type=str, default="")
-    args = parser.parse_args()
+    args, unknown = parser.parse_known_args()
 
     rospy.init_node("corner_teaching_task", anonymous=True)
 
-    # 1. ロボットセットアップ (Setup Phase)
+    # 1. ロボットセットアップ
     ri, robot_model = setup_robot(args.namespace)
 
-    # 2. 指示 (Instruction Phase)
-    # ここを変えるだけで挙動が変わる
-    instruction_verb = "collect"       # 動作
-    # instruction_object = "coffee powder"  # 対象
-    instruction_object = "pile of screws"  # 対象
-
-    # 3. タスク実行 (Execution Phase)
-    execute_instruction(ri, robot_model, instruction_verb, instruction_object)
+    # 2. タスククラスの起動
+    # 初期状態ではタスク(prompt)は空で起動し、サービス待ちorボタン待ちになります
+    task = CornerTeachingTask(ri, robot_model)
+    task.run()
 
 
 if __name__ == "__main__":

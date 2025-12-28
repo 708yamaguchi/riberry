@@ -42,6 +42,7 @@ add_service_files(
   FILES
   RegisterContexts.srv
   SelectMotion.srv
+  TaskInstruction.srv
   VisualPose.srv
 )
 

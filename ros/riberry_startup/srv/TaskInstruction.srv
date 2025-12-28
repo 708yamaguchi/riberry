@@ -1,0 +1,9 @@
+# Request
+string action_verb      # 例: "clean", "collect"
+string target_object    # 例: "screws", "coffee powder"
+int32  repeat_value     # 例: 1, 10
+string repeat_unit      # 例: "times", "minutes"
+---
+# Response
+bool success          # タスク開始に成功したか
+string message        # ステータスメッセージやエラー内容

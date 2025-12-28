@@ -1,0 +1,16 @@
+{
+  "action_registry": {
+    "clean": { "trajectory_type": "zigzag", "margin": 0.03 },
+    "collect": { "trajectory_type": "radial", "margin": 0.05 },
+    "paint": { "trajectory_type": "zigzag", "margin": -0.03 }
+  },
+  "object_registry": {
+    "golden plate": "segmentation",
+    "wood tray": "segmentation",
+    "coffee stain": "segmentation",
+    "coffee powder": "segmentation",
+    "pile of screws": "detection",
+    "screws": "detection"
+  },
+  "valid_units": ["times", "minutes"]
+}
