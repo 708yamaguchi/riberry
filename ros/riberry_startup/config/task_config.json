@@ -5,6 +5,7 @@
     "paint": { "trajectory_type": "zigzag", "margin": -0.03 }
   },
   "object_registry": {
+    "green area": "segmentation",
     "golden plate": "segmentation",
     "wood tray": "segmentation",
     "coffee stain": "segmentation",
