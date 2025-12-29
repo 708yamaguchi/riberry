@@ -195,7 +195,16 @@ class CornerTeachingTask:
             "min_time_step": 0.3,           # [s]
             "error_tolerance": 0.02,        # [m] IK許容誤差
             "gravity_comp_offset": 0.02,    # [m] Vision認識時の重力補正高さ
-            "lift_height": 0.10             # [m] 移動時の持ち上げ高さ
+            "lift_height": 0.10,             # [m] 移動時の持ち上げ高さ
+            # "ee_offset": (-0.1, 0.0, 0.2),  # 刷毛把持用
+            # "ee_offset": (-0.12, 0.0, 0.08),  # 糊用グリッパ
+            # "ee_offset": (0.0, 0.0, 0.08),  # デフォルトグリッパ
+            "ee_offset": (-0.03, 0.0, 0.08),  # 布巾を持つとき（カメラから離した場所が先端になる）
+        }
+
+        self.func_map = {
+            "zigzag": generate_zigzag_trajectory,
+            "radial": generate_radial_gathering_trajectory
         }
 
         # --- TF初期化 ---
@@ -250,10 +259,7 @@ class CornerTeachingTask:
             physical_link = found
 
         self.end_coords = make_cascoords(parent=physical_link)
-        # ee_offset = (-0.1, 0.0, 0.2)  # 刷毛把持用
-        # ee_offset = (-0.12, 0.0, 0.08)  # 糊用グリッパ
-        # ee_offset = (0.0, 0.0, 0.08)  # デフォルトグリッパ
-        ee_offset = (-0.03, 0.0, 0.08)  # 布巾を持つとき（カメラから離した場所が先端になる）
+        ee_offset = self.const_params["ee_offset"]
         self.end_coords.translate(ee_offset, wrt="local")
 
         rospy.loginfo(f"Target Physical Link: {physical_link.name}")
@@ -332,7 +338,6 @@ class CornerTeachingTask:
         action_registry = self.config.get("action_registry", {})
         object_registry = self.config.get("object_registry", {})
 
-        # 1. バリデーション
         if req.action_verb not in action_registry:
             msg = f"Unknown verb: {req.action_verb}"
             rospy.logerr(msg)
@@ -343,15 +348,9 @@ class CornerTeachingTask:
             rospy.logerr(msg)
             return TaskInstructionResponse(success=False, message=msg)
 
-        # 2. 関数マッピング
-        func_map = {
-            "zigzag": generate_zigzag_trajectory,
-            "radial": generate_radial_gathering_trajectory
-        }
-
         action_data = action_registry[req.action_verb]
         traj_type = action_data["trajectory_type"]
-        trajectory_func = func_map.get(traj_type)
+        trajectory_func = self.func_map.get(traj_type)
         vision_strategy = object_registry[req.target_object]
 
         self.current_task_params = {
@@ -392,7 +391,8 @@ class CornerTeachingTask:
     # ==========================================================
     #  Helper: 共通処理 (TF変換 / IK計算)
     # ==========================================================
-    def get_base_coords_from_camera(self, pose_msg):
+    def _transform_pose_to_base(self, pose_msg):
+        """Camera座標系のPoseMsgをBase座標系のCoordinatesに変換"""
         try:
             self.tf_listener.waitForTransform(self.base_frame, self.camera_frame, rospy.Time(0), rospy.Duration(1.0))
             (trans, rot) = self.tf_listener.lookupTransform(self.base_frame, self.camera_frame, rospy.Time(0))
@@ -408,9 +408,8 @@ class CornerTeachingTask:
             rot=np.eye(3)
         )
 
-        co_base_to_obj = co_base_to_cam.copy()
-        co_base_to_obj.transform(co_cam_to_obj)
-        return co_base_to_obj
+        co_base_to_cam.transform(co_cam_to_obj)
+        return co_base_to_cam
 
     def _solve_ik(self, target_coords, seed_av):
         self.robot_model.angle_vector(seed_av)
@@ -587,7 +586,7 @@ class CornerTeachingTask:
 
         base_coords_list = []
         for pose_msg in res.poses:
-            c = self.get_base_coords_from_camera(pose_msg)
+            c = self._transform_pose_to_base(pose_msg)
             if c is None:
                 self.update_display("TF Fail")
                 return
@@ -750,42 +749,82 @@ class CornerTeachingTask:
             time.sleep(2.0)
             return
 
-        rospy.loginfo("Saving start pose...")
-        start_av = self.ri.angle_vector()
+        # --- リピート設定の取得 ---
+        # 手動Playなどでparamsが無い場合はデフォルト(1回)
+        params = self.current_task_params if self.current_task_params else {}
+        rep_val = params.get("repeat_count", 1)
+        rep_unit = params.get("repeat_unit", "times")
 
-        rospy.loginfo("Executing motion...")
-        self.update_display("Playing\n1:STOP")
+        # 時間指定の場合の終了時刻計算
+        start_time_unix = time.time()
+        time_limit = rep_val * 60.0 if rep_unit == "minutes" else 0
+
+        rospy.loginfo(f"Execution Start: {rep_val} {rep_unit}")
+        rospy.loginfo("Saving home pose...")
+        home_av = self.ri.angle_vector() # 終了後に戻る場所
+
         self.ri.servo_on()
-        rospy.loginfo("Moving to trajectory start (3.0s)...")
-        self.ri.angle_vector(self.av_seq[0], 3.0)
-        self.ri.wait_interpolation()
 
-        self.ri.angle_vector_sequence(self.av_seq, times=self.times)
+        loop_count = 0
         is_canceled = False
-        # 1クリックで動作をキャンセル
-        while not rospy.is_shutdown() and self.ri.is_interpolating():
-            # wait_for_button_pressを使うと、呼び出し毎にフラグがリセットされて
-            # タイミングによってボタン入力を取りこぼします。
-            if self.current_button_state == 1:
-                rospy.loginfo("Button 1 pressed -> Canceling motion")
-                self.ri.cancel_angle_vector()  # 動作をキャンセル
-                self.current_button_state = 0  # 処理したのでリセット
-                is_canceled = True
+
+        while not rospy.is_shutdown():
+            # --- 終了判定 ---
+            if rep_unit == "times":
+                if loop_count >= rep_val:
+                    rospy.loginfo("Repeat count reached.")
+                    break
+                display_status = f"Rep {loop_count + 1}/{rep_val}"
+            elif rep_unit == "minutes":
+                elapsed = time.time() - start_time_unix
+                if elapsed >= time_limit:
+                    rospy.loginfo("Time limit reached.")
+                    break
+                remaining = int(time_limit - elapsed)
+                display_status = f"Time {remaining}s"
+            else:
+                # 未知の単位なら1回で終了
+                if loop_count >= 1: break
+                display_status = "Playing"
+
+            rospy.loginfo(f"--- Loop {loop_count + 1} Start ({display_status}) ---")
+            self.update_display(f"{display_status}\n1:STOP")
+
+            # 1. 軌道の開始点へ移動 (2回目以降もここを通ることでループがつながる)
+            # ※初回や遠い場合はゆっくり(3.0s)、近くなら速く移動する制御も可能だが、一旦安全のため3.0s固定
+            self.ri.angle_vector(self.av_seq[0], 3.0)
+            self.ri.wait_interpolation()
+
+            # 2. 軌道実行
+            self.ri.angle_vector_sequence(self.av_seq, times=self.times)
+
+            # 3. 実行中のキャンセル監視
+            while not rospy.is_shutdown() and self.ri.is_interpolating():
+                if self.current_button_state == 1:
+                    rospy.loginfo("Button 1 pressed -> Canceling motion")
+                    self.ri.cancel_angle_vector()
+                    self.current_button_state = 0
+                    is_canceled = True
+                    break
+                time.sleep(0.05)
+
+            if is_canceled:
                 break
-            time.sleep(0.05)
+
+            loop_count += 1
+
+        # --- 終了処理 ---
         if is_canceled:
             rospy.loginfo("Play interrupted by user.")
             self.update_display("STOPPED")
-            time.sleep(1.0)
-            return
-
-        rospy.loginfo("Returning to start pose...")
-        self.update_display("Back to\nStart")
-        self.ri.angle_vector(start_av, 3.0)
-        self.ri.wait_interpolation()
-
-        rospy.loginfo("Motion Finished.")
-        self.update_display("Done")
+        else:
+            rospy.loginfo("All sequences finished. Returning to home pose...")
+            self.update_display("Back to\nStart")
+            # 最後に元の姿勢(Home)に戻る
+            self.ri.angle_vector(home_av, 3.0)
+            self.ri.wait_interpolation()
+            self.update_display("Done")
+            rospy.loginfo("Motion Finished.")
 
     def run(self):
         rospy.loginfo("Task Node Ready. Waiting for commands...")

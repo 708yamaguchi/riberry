@@ -27,15 +27,30 @@ class Florence2Segmenter:
 
         rospy.loginfo("Loading Florence-2 Model...")
         try:
-            self.model = AutoModelForCausalLM.from_pretrained(
-                # "microsoft/Florence-2-base",
-                "microsoft/Florence-2-large-ft",  # Use 'ft' for VQA task
+            # --- 1. VQA用モデル ---
+            # 存在確認(Yes/No)が得意なFine-Tunedモデル
+            rospy.loginfo("Loading VQA Model ...")
+            vqa_model_name = "microsoft/Florence-2-large-ft"
+            self.model_vqa = AutoModelForCausalLM.from_pretrained(
+                vqa_model_name,
                 torch_dtype=self.torch_dtype,
                 trust_remote_code=True
             ).to(self.device)
-            self.processor = AutoProcessor.from_pretrained(
-                # "microsoft/Florence-2-base",
-                "microsoft/Florence-2-large-ft",  # Use 'ft' for VQA task
+            self.processor_vqa = AutoProcessor.from_pretrained(
+                vqa_model_name,
+                trust_remote_code=True
+            )
+            # --- 2. Segmentation用モデル ---
+            # 座標検出(Grounding)が得意なPre-Trainedモデル
+            rospy.loginfo("Loading Segmentation Model ...")
+            seg_model_name = "microsoft/Florence-2-base"
+            self.model_seg = AutoModelForCausalLM.from_pretrained(
+                seg_model_name,
+                torch_dtype=self.torch_dtype,
+                trust_remote_code=True
+            ).to(self.device)
+            self.processor_seg = AutoProcessor.from_pretrained(
+                seg_model_name,
                 trust_remote_code=True
             )
         except Exception as e:
@@ -56,9 +71,9 @@ class Florence2Segmenter:
         text_input = task_prompt + question
 
         try:
-            inputs = self.processor(text=text_input, images=image, return_tensors="pt").to(self.device, self.torch_dtype)
+            inputs = self.processor_vqa(text=text_input, images=image, return_tensors="pt").to(self.device, self.torch_dtype)
 
-            generated_ids = self.model.generate(
+            generated_ids = self.model_vqa.generate(
                 input_ids=inputs["input_ids"],
                 pixel_values=inputs["pixel_values"],
                 max_new_tokens=1024,
@@ -66,10 +81,10 @@ class Florence2Segmenter:
                 num_beams=3
             )
 
-            generated_text = self.processor.batch_decode(generated_ids, skip_special_tokens=False)[0]
+            generated_text = self.processor_vqa.batch_decode(generated_ids, skip_special_tokens=False)[0]
 
             # 結果のパース
-            result = self.processor.post_process_generation(
+            result = self.processor_vqa.post_process_generation(
                 generated_text,
                 task=task_prompt,
                 image_size=(image.shape[1], image.shape[0])
@@ -99,9 +114,9 @@ class Florence2Segmenter:
         text_input = task_prompt + prompt
 
         try:
-            inputs = self.processor(text=text_input, images=image, return_tensors="pt").to(self.device, self.torch_dtype)
+            inputs = self.processor_seg(text=text_input, images=image, return_tensors="pt").to(self.device, self.torch_dtype)
 
-            generated_ids = self.model.generate(
+            generated_ids = self.model_seg.generate(
                 input_ids=inputs["input_ids"],
                 pixel_values=inputs["pixel_values"],
                 max_new_tokens=1024,
@@ -109,9 +124,9 @@ class Florence2Segmenter:
                 do_sample=False
             )
 
-            generated_text = self.processor.batch_decode(generated_ids, skip_special_tokens=False)[0]
+            generated_text = self.processor_seg.batch_decode(generated_ids, skip_special_tokens=False)[0]
 
-            result = self.processor.post_process_generation(
+            result = self.processor_seg.post_process_generation(
                 generated_text,
                 task=task_prompt,
                 image_size=(image.shape[1], image.shape[0])
