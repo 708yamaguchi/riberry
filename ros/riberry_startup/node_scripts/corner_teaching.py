@@ -352,15 +352,29 @@ class CornerTeachingTask:
         action_data = action_registry[req.action_verb]
         traj_type = action_data["trajectory_type"]
         trajectory_func = func_map.get(traj_type)
+        vision_strategy = object_registry[req.target_object]
 
         self.current_task_params = {
             "prompt": req.target_object,
-            "vision_strategy": object_registry[req.target_object],
+            "vision_strategy": vision_strategy,
             "vision_area_margin": action_data["margin"],
             "trajectory_generator": trajectory_func,
             "repeat_count": req.repeat_value,
             "repeat_unit": req.repeat_unit
         }
+
+        rospy.loginfo(
+            "\n=============================================\n"
+            " Task Instruction Accepted\n"
+            "=============================================\n"
+            f" - Target Object      : {req.target_object}\n"
+            f" - Vision Strategy    : {vision_strategy}\n"
+            f" - Vision Area Margin : {action_data['margin']} m\n"
+            f" - Action Verb        : {req.action_verb}\n"
+            f" - Trajectory Type    : {traj_type} ({trajectory_func.__name__})\n"
+            f" - Repeat             : {req.repeat_value} {req.repeat_unit}\n"
+            "============================================="
+        )
 
         # 状態リセット
         self.corners = []
