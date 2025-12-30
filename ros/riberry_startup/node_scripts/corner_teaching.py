@@ -171,9 +171,8 @@ def generate_spiral_stirring_trajectory(corners, corner_avs, step_width=0.02, gr
     """
     4隅で定義される平面上で、外側から中心へ向かい、また外側へ戻る螺旋軌道を生成する。
 
-    改良点:
-    - 平方根配分により、外側の密度を高めた。
-    - 最初に外周を1周する動作を追加し、フチの混ぜ残しを防ぐ。
+    修正点:
+    - 座標軸を強制的に直交化(Gram-Schmidt)し、歪んだコーナー配置でも真円を描けるように修正。
     """
     p = [c.worldpos() for c in corners]
     r = [c.worldrot() for c in corners]
@@ -182,24 +181,39 @@ def generate_spiral_stirring_trajectory(corners, corner_avs, step_width=0.02, gr
     # 1. 平面の定義
     center_pos = np.mean(p, axis=0)
 
-    vec_x = p[1] - p[0]
-    vec_y = p[3] - p[0]
-    len_x = np.linalg.norm(vec_x)
-    len_y = np.linalg.norm(vec_y)
+    # --- 座標軸の直交化 (正規直交基底の生成) ---
+    vec_a = p[1] - p[0] # 仮のX軸
+    vec_b = p[3] - p[0] # 仮のY軸 (直交しているとは限らない)
 
-    # ゼロ除算回避
-    if len_x < 1e-6: len_x = 1.0
-    if len_y < 1e-6: len_y = 1.0
-    unit_x = vec_x / len_x
-    unit_y = vec_y / len_y
+    # 平面の法線ベクトルを算出
+    normal = np.cross(vec_a, vec_b)
+    norm_n = np.linalg.norm(normal)
+    if norm_n < 1e-6:
+        normal = np.array([0, 0, 1]) # 潰れている場合はZ軸仮定
+    else:
+        normal /= norm_n
+
+    # unit_x を決定 (vec_a 方向)
+    len_a = np.linalg.norm(vec_a)
+    if len_a < 1e-6:
+        unit_x = np.array([1, 0, 0])
+    else:
+        unit_x = vec_a / len_a
+
+    # unit_y を決定 (normal と unit_x に直交するベクトル)
+    # これにより unit_x ⊥ unit_y が保証される
+    unit_y = np.cross(normal, unit_x)
+
+    # 半径の基準とする長さ（元の形状のサイズ感を使用）
+    # vec_b の長さそのものではなく、unit_y 方向への射影長を使うのが厳密だが、
+    # ここではシンプルに元の辺の長さを使ってサイズを決定する
+    len_x = np.linalg.norm(vec_a)
+    len_y = np.linalg.norm(vec_b)
 
     # --- 設定パラメータ ---
-    # マージン係数: 0.9だと安全だが壁際が残る。0.95や0.98に上げると攻める。
-    radius_margin = kwargs.get('radius_margin', 0.95)
+    radius_margin = kwargs.get('radius_margin', 1.0)
     max_radius = min(len_x, len_y) / 2.0 * radius_margin
-
-    # 螺旋の回転数
-    spiral_turns = kwargs.get('turns', 4)  # 少し多めに設定
+    spiral_turns = kwargs.get('turns', 2)
 
     # --- ログ出力 ---
     rospy.loginfo("\n" + "="*30)
@@ -211,6 +225,10 @@ def generate_spiral_stirring_trajectory(corners, corner_avs, step_width=0.02, gr
         rospy.loginfo(f"[Spiral] Applying Depth Offset: {depth_offset} (Depth={stir_depth}m)")
 
     rospy.loginfo(f"[Spiral] Max Radius: {max_radius:.4f} m (Margin: {radius_margin})")
+    # 歪みチェック用ログ
+    dot_prod = np.dot(vec_a / len_a, vec_b / len_y)
+    angle_deg = np.degrees(np.arccos(np.clip(dot_prod, -1.0, 1.0)))
+    rospy.loginfo(f"[Spiral] Corner Angle (p1-p0-p3): {angle_deg:.1f} deg (Orthogonalized)")
     rospy.loginfo("="*30 + "\n")
 
     # 姿勢設定
@@ -222,13 +240,9 @@ def generate_spiral_stirring_trajectory(corners, corner_avs, step_width=0.02, gr
         center_av = np.mean(av, axis=0)
 
     # --- 軌道生成の計算 ---
-
-    # 外周を回るための追加距離 (1周分)
     outer_circle_len = 2 * np.pi * max_radius
-    # 螺旋部分の距離概算
     spiral_len = 0.5 * max_radius * (2 * np.pi * spiral_turns)
 
-    # ステップ数計算
     n_steps_outer = max(10, int(outer_circle_len / step_width))
     n_steps_spiral = max(20, int(spiral_len / step_width))
 
@@ -250,9 +264,11 @@ def generate_spiral_stirring_trajectory(corners, corner_avs, step_width=0.02, gr
         return weighted_av
 
     def add_point(radius, angle):
+        # 直交基底 unit_x, unit_y を使って移動
         offset_x = radius * math.cos(angle)
         offset_y = radius * math.sin(angle)
         pos = center_pos + (unit_x * offset_x) + (unit_y * offset_y)
+
         wp = Coordinates(pos=pos, rot=center_rot)
         seed = compute_weighted_seed(pos, p, av, center_pos, center_av)
         waypoints.append(wp)
@@ -261,49 +277,30 @@ def generate_spiral_stirring_trajectory(corners, corner_avs, step_width=0.02, gr
     # ==========================
     # Phase 1: 往路 (外 -> 中)
     # ==========================
-
-    # 1-A. 外周を1周回る (鍋のフチを掃除)
+    # 1-A. 外周を1周回る
     for i in range(n_steps_outer):
         ratio = float(i) / n_steps_outer
         angle = 2 * np.pi * ratio
         add_point(max_radius, angle)
 
-    # 1-B. 外から中へ螺旋 (ルート配分)
-    # t: 0.0(外) -> 1.0(中)
+    # 1-B. 外から中へ螺旋
     for i in range(n_steps_spiral + 1):
         t = float(i) / n_steps_spiral
-
-        # 半径の計算: sqrtを使うことで、tが小さいうち(序盤)は半径が大きく保たれる
-        # t=0.5のとき、半径はsqrt(0.5)=0.7倍の位置 (リニアなら0.5倍の位置)
-        # これにより外側の密度が高くなる
         r_ratio = math.sqrt(1.0 - t)
         current_radius = max_radius * r_ratio
-
-        # 角度は累積させる (外周移動の続きから)
         current_angle = (2 * np.pi) + (2 * np.pi * spiral_turns * t)
-
         add_point(current_radius, current_angle)
 
     # ==========================
     # Phase 2: 復路 (中 -> 外)
     # ==========================
-
-    # 2-A. 中から外へ螺旋 (ルート配分)
     end_angle_inward = (2 * np.pi) + (2 * np.pi * spiral_turns)
-
     for i in range(1, n_steps_spiral + 1):
-        t = float(i) / n_steps_spiral # 0.0 -> 1.0
-
-        # 中(0)から外(1)へ広がる
+        t = float(i) / n_steps_spiral
         r_ratio = math.sqrt(t)
         current_radius = max_radius * r_ratio
-
         current_angle = end_angle_inward + (2 * np.pi * spiral_turns * t)
-
         add_point(current_radius, current_angle)
-
-    # 2-B. 最後に外周を少しなぞって終了位置を整える（オプション）
-    # 今回は往復で閉じるのでここで終了
 
     return waypoints, seed_avs
 
@@ -338,7 +335,7 @@ class CornerTeachingTask:
             "error_tolerance": 0.02,        # [m] IK許容誤差
             "gravity_comp_offset": 0.05,    # [m] Vision認識時の重力補正高さ
             "lift_height": 0.10,            # [m] 移動時の持ち上げ高さ
-            "stir_depth": -0.01,             # [m] かき混ぜ時の深さ
+            "stir_depth": 0.06,             # [m] かき混ぜ時の深さ
             # "ee_offset": (-0.1, 0.0, 0.2),  # 刷毛把持用
             # "ee_offset": (-0.12, 0.0, 0.08),  # 糊用グリッパ
             # "ee_offset": (0.0, 0.0, 0.08),  # デフォルトグリッパ
@@ -564,7 +561,8 @@ class CornerTeachingTask:
             rotation_axis=True,
             # rotation_axis=["xyz"],
             # rotation_axis=["x"],
-            rthre=np.deg2rad(30),
+            # rthre=np.deg2rad(30),
+            rthre=np.deg2rad(45),
             stop=50,
             revert_if_fail=False
         )
