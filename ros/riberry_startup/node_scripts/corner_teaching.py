@@ -70,7 +70,7 @@ def generate_zigzag_trajectory(corners, corner_avs, step_width=0.02, **kwargs):
     return waypoints, seed_avs
 
 
-def generate_radial_gathering_trajectory(corners, corner_avs, step_width=0.03, lift_offset=None, **kwargs):
+def generate_radial_gathering_trajectory(corners, corner_avs, step_width=0.03, gravity_vector=None, lift_height=0.1, **kwargs):
     """
     領域の外周（辺）から中心に向かって掃き寄せるような放射状の軌道を生成する。
     戻る動作の際にアームを持ち上げて、次の開始点へ移動する。
@@ -85,8 +85,9 @@ def generate_radial_gathering_trajectory(corners, corner_avs, step_width=0.03, l
     r = [c.worldrot() for c in corners]
     av = corner_avs
 
-    # オフセットをnumpy配列化
-    lift_vec = np.array(lift_offset)
+    # --- 持ち上げベクトルの決定 ---
+    # 重力と逆方向(上)へ lift_height 分
+    lift_vec = gravity_vector * -1.0 * lift_height
 
     # 1. 領域の中心点を計算
     center_pos = np.mean(p, axis=0)
@@ -166,6 +167,147 @@ def generate_radial_gathering_trajectory(corners, corner_avs, step_width=0.03, l
     return waypoints, seed_avs
 
 
+def generate_spiral_stirring_trajectory(corners, corner_avs, step_width=0.02, gravity_vector=None, stir_depth=0.0, manual_seed_av=None, **kwargs):
+    """
+    4隅で定義される平面上で、外側から中心へ向かい、また外側へ戻る螺旋軌道を生成する。
+
+    改良点:
+    - 平方根配分により、外側の密度を高めた。
+    - 最初に外周を1周する動作を追加し、フチの混ぜ残しを防ぐ。
+    """
+    p = [c.worldpos() for c in corners]
+    r = [c.worldrot() for c in corners]
+    av = corner_avs
+
+    # 1. 平面の定義
+    center_pos = np.mean(p, axis=0)
+
+    vec_x = p[1] - p[0]
+    vec_y = p[3] - p[0]
+    len_x = np.linalg.norm(vec_x)
+    len_y = np.linalg.norm(vec_y)
+
+    # ゼロ除算回避
+    if len_x < 1e-6: len_x = 1.0
+    if len_y < 1e-6: len_y = 1.0
+    unit_x = vec_x / len_x
+    unit_y = vec_y / len_y
+
+    # --- 設定パラメータ ---
+    # マージン係数: 0.9だと安全だが壁際が残る。0.95や0.98に上げると攻める。
+    radius_margin = kwargs.get('radius_margin', 0.95)
+    max_radius = min(len_x, len_y) / 2.0 * radius_margin
+
+    # 螺旋の回転数
+    spiral_turns = kwargs.get('turns', 4)  # 少し多めに設定
+
+    # --- ログ出力 ---
+    rospy.loginfo("\n" + "="*30)
+    rospy.loginfo(f"[Spiral] Detected Center: {center_pos}")
+
+    if gravity_vector is not None and abs(stir_depth) > 1e-6:
+        depth_offset = gravity_vector * stir_depth
+        center_pos += depth_offset
+        rospy.loginfo(f"[Spiral] Applying Depth Offset: {depth_offset} (Depth={stir_depth}m)")
+
+    rospy.loginfo(f"[Spiral] Max Radius: {max_radius:.4f} m (Margin: {radius_margin})")
+    rospy.loginfo("="*30 + "\n")
+
+    # 姿勢設定
+    center_rot = interpolate_rotation_matrices(0.5, r[0], r[2])
+
+    if manual_seed_av is not None:
+        center_av = np.array(manual_seed_av)
+    else:
+        center_av = np.mean(av, axis=0)
+
+    # --- 軌道生成の計算 ---
+
+    # 外周を回るための追加距離 (1周分)
+    outer_circle_len = 2 * np.pi * max_radius
+    # 螺旋部分の距離概算
+    spiral_len = 0.5 * max_radius * (2 * np.pi * spiral_turns)
+
+    # ステップ数計算
+    n_steps_outer = max(10, int(outer_circle_len / step_width))
+    n_steps_spiral = max(20, int(spiral_len / step_width))
+
+    waypoints = []
+    seed_avs = []
+
+    # 重み付きシード計算関数
+    def compute_weighted_seed(current_pos, corner_positions, corner_avs, center_pos, center_av):
+        dists = [np.linalg.norm(current_pos - c_pos) for c_pos in corner_positions]
+        dist_center = np.linalg.norm(current_pos - center_pos)
+        weights = [1.0 / (d + 1e-4) for d in dists]
+        weights.append(1.0 / (dist_center + 1e-4))
+        weights = np.array(weights)
+        weights /= np.sum(weights)
+        target_avs = list(corner_avs) + [center_av]
+        weighted_av = np.zeros_like(center_av)
+        for w, av_vec in zip(weights, target_avs):
+            weighted_av += w * av_vec
+        return weighted_av
+
+    def add_point(radius, angle):
+        offset_x = radius * math.cos(angle)
+        offset_y = radius * math.sin(angle)
+        pos = center_pos + (unit_x * offset_x) + (unit_y * offset_y)
+        wp = Coordinates(pos=pos, rot=center_rot)
+        seed = compute_weighted_seed(pos, p, av, center_pos, center_av)
+        waypoints.append(wp)
+        seed_avs.append(seed)
+
+    # ==========================
+    # Phase 1: 往路 (外 -> 中)
+    # ==========================
+
+    # 1-A. 外周を1周回る (鍋のフチを掃除)
+    for i in range(n_steps_outer):
+        ratio = float(i) / n_steps_outer
+        angle = 2 * np.pi * ratio
+        add_point(max_radius, angle)
+
+    # 1-B. 外から中へ螺旋 (ルート配分)
+    # t: 0.0(外) -> 1.0(中)
+    for i in range(n_steps_spiral + 1):
+        t = float(i) / n_steps_spiral
+
+        # 半径の計算: sqrtを使うことで、tが小さいうち(序盤)は半径が大きく保たれる
+        # t=0.5のとき、半径はsqrt(0.5)=0.7倍の位置 (リニアなら0.5倍の位置)
+        # これにより外側の密度が高くなる
+        r_ratio = math.sqrt(1.0 - t)
+        current_radius = max_radius * r_ratio
+
+        # 角度は累積させる (外周移動の続きから)
+        current_angle = (2 * np.pi) + (2 * np.pi * spiral_turns * t)
+
+        add_point(current_radius, current_angle)
+
+    # ==========================
+    # Phase 2: 復路 (中 -> 外)
+    # ==========================
+
+    # 2-A. 中から外へ螺旋 (ルート配分)
+    end_angle_inward = (2 * np.pi) + (2 * np.pi * spiral_turns)
+
+    for i in range(1, n_steps_spiral + 1):
+        t = float(i) / n_steps_spiral # 0.0 -> 1.0
+
+        # 中(0)から外(1)へ広がる
+        r_ratio = math.sqrt(t)
+        current_radius = max_radius * r_ratio
+
+        current_angle = end_angle_inward + (2 * np.pi * spiral_turns * t)
+
+        add_point(current_radius, current_angle)
+
+    # 2-B. 最後に外周を少しなぞって終了位置を整える（オプション）
+    # 今回は往復で閉じるのでここで終了
+
+    return waypoints, seed_avs
+
+
 # ==========================================================
 #  Corner Teaching Task Class
 # ==========================================================
@@ -194,17 +336,20 @@ class CornerTeachingTask:
             "target_speed": 0.15,           # [m/s]
             "min_time_step": 0.3,           # [s]
             "error_tolerance": 0.02,        # [m] IK許容誤差
-            "gravity_comp_offset": 0.02,    # [m] Vision認識時の重力補正高さ
-            "lift_height": 0.10,             # [m] 移動時の持ち上げ高さ
+            "gravity_comp_offset": 0.05,    # [m] Vision認識時の重力補正高さ
+            "lift_height": 0.10,            # [m] 移動時の持ち上げ高さ
+            "stir_depth": -0.01,             # [m] かき混ぜ時の深さ
             # "ee_offset": (-0.1, 0.0, 0.2),  # 刷毛把持用
             # "ee_offset": (-0.12, 0.0, 0.08),  # 糊用グリッパ
             # "ee_offset": (0.0, 0.0, 0.08),  # デフォルトグリッパ
-            "ee_offset": (-0.03, 0.0, 0.08),  # 布巾を持つとき（カメラから離した場所が先端になる）
+            # "ee_offset": (-0.03, 0.0, 0.08),  # 布巾を持つとき（カメラから離した場所が先端になる）
+            "ee_offset": (-0.12, 0.0, 0.25),  # 箸をもつとき
         }
 
         self.func_map = {
             "zigzag": generate_zigzag_trajectory,
-            "radial": generate_radial_gathering_trajectory
+            "radial": generate_radial_gathering_trajectory,
+            "spiral": generate_spiral_stirring_trajectory,
         }
 
         # --- TF初期化 ---
@@ -684,17 +829,20 @@ class CornerTeachingTask:
             self.av_seq = []
             return
 
-        # lift_vec = 重力ベクトル * -1 (上向き) * スカラー高さ
+        # radial用: 持ち上げ高さ
         lift_height = self.const_params["lift_height"]
-        lift_vec = self.gravity_vector * -1.0 * lift_height
-        rospy.loginfo(f"[Plan] Applying Lift Vector: {lift_vec} (based on Gravity)")
+        # spiral用: 鍋底への沈み込み深さ (const_paramsに追加することを推奨)
+        stir_depth = self.const_params["stir_depth"]
 
         # --- 外部から注入された軌道生成関数を使用 ---
         rospy.loginfo(f"Generating trajectory using: {trajectory_generator.__name__}")
         waypoints, seed_avs = trajectory_generator(
             self.corners,
             self.corner_avs,
-            lift_offset=lift_vec
+            gravity_vector=self.gravity_vector, # 共通: 重力ベクトル
+            lift_height=lift_height,            # Radial用: 持ち上げ高さ
+            stir_depth=stir_depth,              # Spiral用: 沈める深さ
+            manual_seed_av=self.manual_seed_av
         )
 
         seq = self.solve_full_ik(waypoints, seed_avs)

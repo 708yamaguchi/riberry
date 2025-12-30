@@ -43,7 +43,8 @@ class Florence2Segmenter:
             # --- 2. Segmentation用モデル ---
             # 座標検出(Grounding)が得意なPre-Trainedモデル
             rospy.loginfo("Loading Segmentation Model ...")
-            seg_model_name = "microsoft/Florence-2-base"
+            # seg_model_name = "microsoft/Florence-2-base"
+            seg_model_name = "microsoft/Florence-2-large"
             self.model_seg = AutoModelForCausalLM.from_pretrained(
                 seg_model_name,
                 torch_dtype=self.torch_dtype,
