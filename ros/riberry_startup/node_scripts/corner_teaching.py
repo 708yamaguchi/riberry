@@ -305,6 +305,115 @@ def generate_spiral_stirring_trajectory(corners, corner_avs, step_width=0.02, gr
     return waypoints, seed_avs
 
 
+def generate_grid_pressing_trajectory(corners, corner_avs, step_width=0.05, gravity_vector=None, approach_offset=0.05, press_stroke=0.03, manual_seed_av=None, **kwargs):
+    """
+    領域内をグリッド状に移動し、各点に対して垂直方向の押し込み（プレス）動作を行う。
+    """
+    p = [c.worldpos() for c in corners]
+    r = [c.worldrot() for c in corners]
+    av = corner_avs
+
+    if gravity_vector is None:
+        g_vec = np.array([0, 0, -1.0])
+    else:
+        g_vec = np.array(gravity_vector)
+
+    vec_up = -1.0 * g_vec
+    vec_down = g_vec
+
+    # 進行方向(0->3)の長さを基準に「行数」を計算
+    len_long = np.linalg.norm(p[3] - p[0])
+    n_rows = max(1, int(len_long / step_width))
+
+    waypoints = []
+    seed_avs = []
+
+    center_pos_global = np.mean(p, axis=0)
+    center_av_global = np.array(manual_seed_av) if manual_seed_av is not None else np.mean(av, axis=0)
+
+    def compute_weighted_seed(current_pos):
+        dists = [np.linalg.norm(current_pos - c_pos) for c_pos in p]
+        weights = [1.0 / (d + 1e-4) for d in dists]
+        dist_center = np.linalg.norm(current_pos - center_pos_global)
+        weights.append(1.0 / (dist_center + 1e-4))
+        
+        weights = np.array(weights)
+        weights /= np.sum(weights)
+        
+        target_avs = list(av) + [center_av_global]
+        weighted_av = np.zeros_like(center_av_global)
+        for w, av_vec in zip(weights, target_avs):
+            weighted_av += w * av_vec
+        return weighted_av
+
+    # グリッド走査
+    for i in range(n_rows + 1):
+        ratio_row = float(i) / n_rows
+        
+        p_left = p[0] + (p[3] - p[0]) * ratio_row
+        p_right = p[1] + (p[2] - p[1]) * ratio_row
+        
+        r_left = interpolate_rotation_matrices(ratio_row, r[0], r[3])
+        r_right = interpolate_rotation_matrices(ratio_row, r[1], r[2])
+
+        len_lat = np.linalg.norm(p_right - p_left)
+        n_cols = max(1, int(len_lat / step_width))
+
+        col_range = range(n_cols + 1) if i % 2 == 0 else range(n_cols, -1, -1)
+
+        for j in col_range:
+            ratio_col = float(j) / n_cols
+            
+            # cornersで定義される「安全高さ(Safe Plane)」上の点
+            p_safe_plane = p_left + (p_right - p_left) * ratio_col
+            r_surf = interpolate_rotation_matrices(ratio_col, r_left, r_right)
+
+            # --- 動作ポイントの基準 ---
+            # 1. 基準位置 (Top)
+            pos_top = p_safe_plane + (vec_up * approach_offset)
+            # 2. 押し込み位置 (Bottom)
+            pos_bottom = pos_top + (vec_down * press_stroke)
+
+            # --- シーケンス生成 ---
+            
+            # 1. まず基準位置(Top)へ移動 (アプローチ) - 通常速度
+            #    (Coordinatesの参照切れを防ぐため毎回生成する)
+            wp_top_approach = Coordinates(pos=pos_top, rot=r_surf)
+            seed_top = compute_weighted_seed(pos_top)
+            
+            waypoints.append(wp_top_approach)
+            seed_avs.append(seed_top)
+
+            # 2. 押し込み (Top -> Bottom) - 分割してゆっくり
+            # press_steps が 5 なら、0.3s(min_time_step) * 5 = 1.5s かけて押し込む
+            press_steps = 5
+            steps = max(1, press_steps)
+            for k in range(1, steps + 1):
+                ratio = float(k) / steps
+                # TopからBottomへ向かうベクトルを少しずつ足す
+                pos_inter = pos_top + (vec_down * press_stroke * ratio)
+                
+                wp_inter = Coordinates(pos=pos_inter, rot=r_surf)
+                seed_inter = compute_weighted_seed(pos_inter)
+                
+                waypoints.append(wp_inter)
+                seed_avs.append(seed_inter)
+
+            # 3. 戻り (Bottom -> Top) - 分割してゆっくり
+            for k in range(1, steps + 1):
+                ratio = float(k) / steps
+                # BottomからTopへ向かうベクトルを少しずつ足す
+                pos_inter = pos_bottom + (vec_up * press_stroke * ratio)
+                
+                wp_inter = Coordinates(pos=pos_inter, rot=r_surf)
+                seed_inter = compute_weighted_seed(pos_inter)
+                
+                waypoints.append(wp_inter)
+                seed_avs.append(seed_inter)
+
+    return waypoints, seed_avs
+
+
 # ==========================================================
 #  Corner Teaching Task Class
 # ==========================================================
@@ -336,17 +445,21 @@ class CornerTeachingTask:
             "gravity_comp_offset": 0.05,    # [m] Vision認識時の重力補正高さ
             "lift_height": 0.10,            # [m] 移動時の持ち上げ高さ
             "stir_depth": 0.06,             # [m] かき混ぜ時の深さ
+            "press_approach": 0.1,         # 基準高さオフセット (認識面より上)
+            "press_stroke": 0.15,           # 押し込み深さ (基準高さより下)
             # "ee_offset": (-0.1, 0.0, 0.2),  # 刷毛把持用
             # "ee_offset": (-0.12, 0.0, 0.08),  # 糊用グリッパ
             # "ee_offset": (0.0, 0.0, 0.08),  # デフォルトグリッパ
             # "ee_offset": (-0.03, 0.0, 0.08),  # 布巾を持つとき（カメラから離した場所が先端になる）
-            "ee_offset": (-0.12, 0.0, 0.25),  # 箸をもつとき
+            # "ee_offset": (-0.12, 0.0, 0.25),  # 箸をもつとき
+            "ee_offset": (-0.11, 0.0, 0.14),  # 押し洗い用エンドエフェクタ
         }
 
         self.func_map = {
             "zigzag": generate_zigzag_trajectory,
             "radial": generate_radial_gathering_trajectory,
             "spiral": generate_spiral_stirring_trajectory,
+            "press": generate_grid_pressing_trajectory,
         }
 
         # --- TF初期化 ---
@@ -829,8 +942,10 @@ class CornerTeachingTask:
 
         # radial用: 持ち上げ高さ
         lift_height = self.const_params["lift_height"]
-        # spiral用: 鍋底への沈み込み深さ (const_paramsに追加することを推奨)
+        # spiral用: 鍋底への沈み込み深さ
         stir_depth = self.const_params["stir_depth"]
+        press_approach = self.const_params["press_approach"]
+        press_stroke = self.const_params["press_stroke"]
 
         # --- 外部から注入された軌道生成関数を使用 ---
         rospy.loginfo(f"Generating trajectory using: {trajectory_generator.__name__}")
@@ -840,6 +955,8 @@ class CornerTeachingTask:
             gravity_vector=self.gravity_vector, # 共通: 重力ベクトル
             lift_height=lift_height,            # Radial用: 持ち上げ高さ
             stir_depth=stir_depth,              # Spiral用: 沈める深さ
+            approach_offset=press_approach,     # Press用
+            press_stroke=press_stroke,          # Press用
             manual_seed_av=self.manual_seed_av
         )
 
