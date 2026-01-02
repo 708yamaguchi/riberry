@@ -4,7 +4,7 @@
     "collect": { "trajectory_type": "radial", "margin": 0.05 },
     "paint": { "trajectory_type": "zigzag", "margin": -0.03 },
     "stir": { "trajectory_type": "spiral", "margin": -0.02 },
-    "press": { "trajectory_type": "press", "margin": -0.05 }
+    "press": { "trajectory_type": "press", "margin": -0.06 }
   },
   "object_registry": {
     "green area": "segmentation",
