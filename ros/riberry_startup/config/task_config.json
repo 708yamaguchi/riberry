@@ -1,10 +1,35 @@
 {
   "action_registry": {
-    "wipe": { "trajectory_type": "zigzag", "margin": 0.03 },
-    "collect": { "trajectory_type": "radial", "margin": 0.05 },
-    "paint": { "trajectory_type": "zigzag", "margin": -0.03 },
-    "stir": { "trajectory_type": "spiral", "margin": -0.02 },
-    "press": { "trajectory_type": "press", "margin": -0.06 }
+    "wipe": {
+      "trajectory_type": "zigzag",
+      "margin": 0.03,
+      "rotation_axis": true
+    },
+    "collect": {
+      "trajectory_type": "radial",
+      "margin": 0.05,
+      "rotation_axis": true
+    },
+    "paint": {
+      "trajectory_type": "zigzag",
+      "margin": -0.03,
+      "rotation_axis": true
+    },
+    "stir": {
+      "trajectory_type": "spiral",
+      "margin": -0.02,
+      "rotation_axis": true
+    },
+    "press": {
+      "trajectory_type": "press",
+      "margin": -0.06,
+          "rotation_axis": true
+    },
+    "trace": {
+      "trajectory_type": "zigzag",
+      "margin": -0.08,
+      "rotation_axis": "x"
+    }
   },
   "object_registry": {
     "green area": "segmentation",
@@ -14,6 +39,7 @@
     "coffee powder": "segmentation",
     "white washbasin": "segmentation",
     "inside of cooking pot": "segmentation",
+    "sleeve of sweater": "segmentation",
     "pile of screws": "detection",
     "screws": "detection"
   },

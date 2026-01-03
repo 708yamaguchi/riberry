@@ -448,19 +448,20 @@ class CornerTeachingTask:
             "target_speed": 0.15,           # [m/s]
             "min_time_step": 0.3,           # [s]
             "error_tolerance": 0.02,        # [m] IK許容誤差
-            "gravity_comp_offset": 0.05,    # [m] Vision認識時の重力補正高さ
+            "gravity_comp_offset": 0.20,    # [m] Vision認識時の重力補正高さ
             "lift_height": 0.10,            # [m] 移動時の持ち上げ高さ
             "stir_depth": 0.06,             # [m] かき混ぜ時の深さ
             "press_stroke": 0.18,           # 押し込み深さ (基準高さより下)
 
-            "vision_base_offset": (0.0, 0.0, -0.05),  # [m] ベース座標系相対でのオフセット
+            "vision_base_offset": (0.0, 0.0, 0.0),  # [m] ベース座標系相対でのオフセット
 
             # "ee_offset": (-0.1, 0.0, 0.2),  # 刷毛把持用
             # "ee_offset": (-0.12, 0.0, 0.08),  # 糊用グリッパ
             # "ee_offset": (0.0, 0.0, 0.08),  # デフォルトグリッパ
             # "ee_offset": (-0.03, 0.0, 0.08),  # 布巾を持つとき（カメラから離した場所が先端になる）
             # "ee_offset": (-0.12, 0.0, 0.25),  # 箸をもつとき
-            "ee_offset": (-0.11, 0.0, 0.14),  # 押し洗い用エンドエフェクタ
+            # "ee_offset": (-0.11, 0.0, 0.14),  # 押し洗い用エンドエフェクタ
+            "ee_offset": (-0.12, 0.0, 0.15),    # 毛玉とるとる用エンドエフェクタ
         }
 
         self.func_map = {
@@ -615,6 +616,7 @@ class CornerTeachingTask:
         traj_type = action_data["trajectory_type"]
         trajectory_func = self.func_map.get(traj_type)
         vision_strategy = object_registry[req.target_object]
+        rotation_axis = action_data["rotation_axis"]
 
         self.current_task_params = {
             "prompt": req.target_object,
@@ -622,7 +624,8 @@ class CornerTeachingTask:
             "vision_area_margin": action_data["margin"],
             "trajectory_generator": trajectory_func,
             "repeat_count": req.repeat_value,
-            "repeat_unit": req.repeat_unit
+            "repeat_unit": req.repeat_unit,
+            "rotation_axis": rotation_axis
         }
 
         rospy.loginfo(
@@ -634,16 +637,13 @@ class CornerTeachingTask:
             f" - Vision Area Margin : {action_data['margin']} m\n"
             f" - Action Verb        : {req.action_verb}\n"
             f" - Trajectory Type    : {traj_type} ({trajectory_func.__name__})\n"
+            f" - Rotation Axis      : {rotation_axis}\n"
             f" - Repeat             : {req.repeat_value} {req.repeat_unit}\n"
             "============================================="
         )
 
-        # 状態リセット
         self.corners = []
         self.av_seq = []
-        # self.manual_seed_av = None # シードは再利用したいのでリセットしない
-
-        # --- 追加: 自動実行フラグをONにする ---
         self.requested_from_service = True
 
         self.update_display(f"New Task:\n{req.target_object}")
@@ -675,14 +675,16 @@ class CornerTeachingTask:
         return co_base_to_cam
 
     def _solve_ik(self, target_coords, seed_av):
+        rot_axis = True
+        if self.current_task_params and "rotation_axis" in self.current_task_params:
+            rot_axis = self.current_task_params["rotation_axis"]
+
         self.robot_model.angle_vector(seed_av)
         result = self.robot_model.inverse_kinematics(
             target_coords=target_coords,
             move_target=self.end_coords,
-            rotation_axis=True,
-            # rotation_axis=["xyz"],
-            # rotation_axis=["x"],
-            rthre=np.deg2rad(30),
+            rotation_axis=rot_axis,
+            rthre=np.deg2rad(5),
             # rthre=np.deg2rad(45),
             stop=50,
             revert_if_fail=False
