@@ -2,32 +2,32 @@
   "action_registry": {
     "wipe": {
       "trajectory_type": "zigzag",
-      "margin": 0.03,
+      "margin": 1.05,
       "rotation_axis": true
     },
     "collect": {
       "trajectory_type": "radial",
-      "margin": 0.05,
+      "margin": 1.1,
       "rotation_axis": true
     },
     "paint": {
       "trajectory_type": "zigzag",
-      "margin": -0.03,
+      "margin": 0.95,
       "rotation_axis": true
     },
     "stir": {
       "trajectory_type": "spiral",
-      "margin": -0.02,
+      "margin": 0.98,
       "rotation_axis": true
     },
     "press": {
       "trajectory_type": "press",
-      "margin": -0.06,
+      "margin": 0.93,
           "rotation_axis": true
     },
     "trace": {
-      "trajectory_type": "zigzag",
-      "margin": 0,
+      "trajectory_type": "trace",
+      "margin": 0.94,
       "rotation_axis": "x"
     }
   },
@@ -40,6 +40,7 @@
     "white washbasin": "segmentation",
     "inside of cooking pot": "segmentation",
     "dark green sweater": "segmentation",
+    "black scarf": "segmentation",
     "pile of screws": "detection",
     "screws": "detection"
   },

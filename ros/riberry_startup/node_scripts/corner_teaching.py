@@ -28,7 +28,7 @@ import tf
 def log_target_coords(tag, coords):
     pos = coords.worldpos()
     # rpy_angle() は [yaw(z), pitch(y), roll(x)] を返す (単位: rad)
-    rpy = coords.rpy_angle()[0] 
+    rpy = coords.rpy_angle()[0]
     rpy_deg = np.rad2deg(rpy)
     rospy.loginfo(f"[{tag}] Pos=[{pos[0]:.3f}, {pos[1]:.3f}, {pos[2]:.3f}] "
                   f"RPY_deg=[{rpy_deg[0]:.1f}, {rpy_deg[1]:.1f}, {rpy_deg[2]:.1f}]")
@@ -82,6 +82,159 @@ def generate_zigzag_trajectory(corners, corner_avs, step_width=0.02, **kwargs):
         log_target_coords(f"Zigzag_WP_{i:02d}", wp)
     rospy.loginfo("--------------------------------------")
 
+    return waypoints, seed_avs
+
+
+def generate_trace_trajectory(corners, corner_avs, step_width=0.02, gravity_vector=None, lift_height=0.1, **kwargs):
+    """
+    一方向になでる動作（Trace）。
+    指定されたローカル軸（例: "y+"）が、長辺/短辺のどちらに近いかを判定し、
+    その方向にストロークするようにコーナー順序を自動で入れ替えて生成する。
+    """
+    # ============================================================
+    #  ユーザー設定エリア (ここを変更してストローク方向を制御)
+    # ============================================================
+    # ロボット手先(EndEffector)座標系でのストローク方向を指定
+    # "x+", "x-", "y+", "y-", "z+", "z-" が指定可能
+    target_local_axis = "y+"
+    # ============================================================
+
+    # 1. データの展開
+    raw_p = [c.worldpos() for c in corners]
+    raw_r = [c.worldrot() for c in corners]
+    raw_av = corner_avs
+
+    # 2. ローカル軸ベクトルをワールド座標系に変換
+    # 基準としてCorner0の回転を使用（平面なのでどれでも大差ないが、代表値として）
+    ref_rot = raw_r[0]
+
+    axis_char = target_local_axis[0] # 'x', 'y', 'z'
+    sign_str = target_local_axis[1]  # '+', '-'
+
+    unit_vecs = {
+        "x": np.array([1.0, 0.0, 0.0]),
+        "y": np.array([0.0, 1.0, 0.0]),
+        "z": np.array([0.0, 0.0, 1.0])
+    }
+    sign = -1.0 if sign_str == "-" else 1.0
+
+    # 手先ローカルでの方向ベクトル
+    vec_local = unit_vecs[axis_char] * sign
+    # ワールド座標系での希望ストロークベクトル
+    vec_target_world = ref_rot.dot(vec_local)
+
+    # 3. 現状のコーナー配置における辺ベクトル
+    # candidate_A: 0 -> 1 (幅方向 / デフォルトのストローク方向)
+    vec_01 = raw_p[1] - raw_p[0]
+    # candidate_B: 0 -> 3 (奥行き方向 / デフォルトの進行方向)
+    vec_03 = raw_p[3] - raw_p[0]
+
+    # 4. 内積で類似度判定（平行に近い辺を採用する）
+    score_01 = abs(np.dot(vec_01 / (np.linalg.norm(vec_01) + 1e-6), vec_target_world))
+    score_03 = abs(np.dot(vec_03 / (np.linalg.norm(vec_03) + 1e-6), vec_target_world))
+
+    # コーナーのインデックスマッピング決定
+    # [New0, New1, New2, New3]
+    # ループ生成ロジックは常に「New0 -> New3へ進みながら、New0 -> New1へなでる」
+    idx_map = []
+
+    if score_01 > score_03:
+        # 0->1 (幅方向) のラインを採用
+        if np.dot(vec_01, vec_target_world) >= 0:
+            # 向きも合っている (0 -> 1)
+            idx_map = [0, 1, 2, 3]
+            rospy.loginfo(f"[Trace] Aligning to 0->1 (Standard) for local {target_local_axis}")
+        else:
+            # 向きが逆 (1 -> 0)
+            # Advance方向(0->3)のペア関係を維持しつつ左右反転
+            # Start:1, StrokeEnd:0, AdvanceEnd:2, StrokeEndAtAdvance:3
+            idx_map = [1, 0, 3, 2]
+            rospy.loginfo(f"[Trace] Aligning to 1->0 (Reverse Width) for local {target_local_axis}")
+    else:
+        # 0->3 (奥行き方向) のラインを採用 (グリッドを転置)
+        if np.dot(vec_03, vec_target_world) >= 0:
+            # 向きも合っている (0 -> 3)
+            # 0を始点として、Stroke先を3にする。Advance先を1にする。
+            idx_map = [0, 3, 2, 1]
+            rospy.loginfo(f"[Trace] Aligning to 0->3 (Transposed) for local {target_local_axis}")
+        else:
+            # 向きが逆 (3 -> 0)
+            # 3を始点として、Stroke先を0にする。Advance先を2にする。
+            idx_map = [3, 0, 1, 2]
+            rospy.loginfo(f"[Trace] Aligning to 3->0 (Reverse Transposed) for local {target_local_axis}")
+
+    # 5. 並べ替えた座標リストを作成
+    p = [raw_p[i] for i in idx_map]
+    r = [raw_r[i] for i in idx_map]
+    av = [raw_av[i] for i in idx_map]
+
+    # --- 以下、既存のロジック (p, r, avを使用) ---
+
+    # --- 持ち上げベクトルの決定 ---
+    if gravity_vector is None:
+        lift_vec = np.array([0, 0, 0.1])
+    else:
+        lift_vec = gravity_vector * -1.0 * lift_height
+
+    # 進行方向(New0 -> New3)の長さを基準にステップ数を計算
+    len_advance = np.linalg.norm(p[3] - p[0])
+
+    if step_width < 0.001: step_width = 0.02
+    n_steps = max(1, int(len_advance / step_width))
+
+    waypoints = []
+    seed_avs = []
+
+    for i in range(n_steps + 1):
+        ratio = float(i) / n_steps
+
+        # 位置の補間
+        pos_start = p[0] + (p[3] - p[0]) * ratio
+        pos_end = p[1] + (p[2] - p[1]) * ratio
+
+        # 回転の補間
+        rot_start = interpolate_rotation_matrices(ratio, r[0], r[3])
+        rot_end = interpolate_rotation_matrices(ratio, r[1], r[2])
+
+        # 関節角度の補間
+        av_start = av[0] + (av[3] - av[0]) * ratio
+        av_end = av[1] + (av[2] - av[1]) * ratio
+
+        wp_start = Coordinates(pos=pos_start, rot=rot_start)
+        wp_end = Coordinates(pos=pos_end, rot=rot_end)
+
+        # 1. 始点 (Start)
+        waypoints.append(wp_start)
+        seed_avs.append(av_start)
+
+        # 2. 終点へなでる (Stroke)
+        waypoints.append(wp_end)
+        seed_avs.append(av_end)
+
+        # 復帰動作
+        if i < n_steps:
+            ratio_next = float(i + 1) / n_steps
+
+            # 次の始点
+            pos_next_start = p[0] + (p[3] - p[0]) * ratio_next
+            rot_next_start = interpolate_rotation_matrices(ratio_next, r[0], r[3])
+            av_next_start = av[0] + (av[3] - av[0]) * ratio_next
+
+            # 3. 終点で持ち上げ (Lift Up)
+            pos_end_lift = pos_end + lift_vec
+            wp_end_lift = Coordinates(pos=pos_end_lift, rot=rot_end)
+
+            waypoints.append(wp_end_lift)
+            seed_avs.append(av_end)
+
+            # 4. 次の始点の直上へ移動 (Return in Air)
+            pos_next_start_lift = pos_next_start + lift_vec
+            wp_next_lift = Coordinates(pos=pos_next_start_lift, rot=rot_next_start)
+
+            waypoints.append(wp_next_lift)
+            seed_avs.append(av_next_start)
+
+    rospy.loginfo(f"--- [DEBUG] Trace Waypoints: {len(waypoints)} points generated ---")
     return waypoints, seed_avs
 
 
@@ -464,8 +617,8 @@ class CornerTeachingTask:
             "min_time_step": 0.3,           # [s]
             "pos_error_tolerance": 0.02,        # [m] IK許容誤差
             "rot_error_tolerance": np.deg2rad(5.0), # [rad] IK回転許容誤差 (rthre)
-            "gravity_comp_offset": 0.15,    # [m] Vision認識時の重力補正高さ
-            "lift_height": 0.10,            # [m] 移動時の持ち上げ高さ
+            "gravity_comp_offset": 0.05,    # [m] Vision認識時の重力補正高さ
+            "lift_height": 0.15,            # [m] 移動時の持ち上げ高さ
             "stir_depth": 0.06,             # [m] かき混ぜ時の深さ
             "press_stroke": 0.18,           # 押し込み深さ (基準高さより下)
 
@@ -485,6 +638,7 @@ class CornerTeachingTask:
             "radial": generate_radial_gathering_trajectory,
             "spiral": generate_spiral_stirring_trajectory,
             "press": generate_grid_pressing_trajectory,
+            "trace": generate_trace_trajectory,
         }
 
         # --- TF初期化 ---
@@ -512,11 +666,9 @@ class CornerTeachingTask:
         rospy.loginfo("Service /task_instruction is ready.")
 
         # --- 保存データ ---
-        self.corners = []
-        self.corner_avs = []
         self.av_seq = []
         self.times = []
-        self.manual_seed_av = None
+        self.manual_seed_avs = []
 
         # --- IMUと重力関連 ---
         # 重力ベクトル (初期値はとりあえずZ下向きと仮定)
@@ -637,7 +789,7 @@ class CornerTeachingTask:
         self.current_task_params = {
             "prompt": req.target_object,
             "vision_strategy": vision_strategy,
-            "vision_area_margin": action_data["margin"],
+            "vision_area_margin": action_data["margin"],  # 1.02 や 0.98 などの倍率が入る
             "trajectory_generator": trajectory_func,
             "repeat_count": req.repeat_value,
             "repeat_unit": req.repeat_unit,
@@ -658,7 +810,6 @@ class CornerTeachingTask:
             "============================================="
         )
 
-        self.corners = []
         self.av_seq = []
         self.requested_from_service = True
 
@@ -695,14 +846,14 @@ class CornerTeachingTask:
         rot_axis = True
         rthre_val = self.const_params["rot_error_tolerance"]
         pos_thre_val = self.const_params["pos_error_tolerance"]
-        
+
         if self.current_task_params:
             rot_axis = self.current_task_params.get("rotation_axis", True)
 
         # 2. まずは厳格に解く (revert_if_fail=True)
         # これが成功するのが一番きれいな姿勢です
         self.robot_model.angle_vector(seed_av)
-        
+
         result = self.robot_model.inverse_kinematics(
             target_coords=target_coords,
             move_target=self.end_coords,
@@ -765,10 +916,10 @@ class CornerTeachingTask:
             # 計画が存在する場合のみ Play を表示・選択可能にする
             if self.av_seq:
                 # ユーザー要望に合わせて改行を入れる
-                self.update_display("Manual\n1: Teach\n2: Play")
+                self.update_display("Manual\n1: Teach\n2: Play\n3: Back")
                 valid_btns = [1, 2, 3]
             else:
-                self.update_display("Manual\n1: Teach")
+                self.update_display("Manual\n1: Teach\n\n3: Back")
                 valid_btns = [1, 3]
 
             btn = self.wait_for_button_press(valid_buttons=valid_btns, timeout=0.5)
@@ -830,12 +981,14 @@ class CornerTeachingTask:
     # ==========================================================
     def set_vision_seed(self):
         rospy.loginfo("Setting IK Seed for Vision...")
-        # 呼ばれた瞬間の姿勢をシードとして保存
-        self.manual_seed_av = self.ri.angle_vector()
-
-        rospy.loginfo("Manual seed_av captured.")
-        self.update_display("Seed Saved!")
-        time.sleep(1.5)
+        self.manual_seed_avs.append(self.ri.angle_vector())
+        count = len(self.manual_seed_avs)
+        rospy.loginfo(f"Manual seed_av captured. Total seeds: {count}")
+        if count == 1:
+            self.update_display("Seed Saved!\n(1st)")
+        else:
+            self.update_display(f"Seed Add!\nTotal {count}")
+        time.sleep(1.0)
 
     def teach_corners_vision(self, long_side_stroke=True):
         """
@@ -843,8 +996,8 @@ class CornerTeachingTask:
         ボタン操作は排除し、実行可能かどうかの判定と処理のみ行う。
         """
         # シードがない場合は失敗
-        if self.manual_seed_av is None:
-            rospy.logerr("Seed AV is not set. Please set seed manually first.")
+        if not self.manual_seed_avs:
+            rospy.logerr("Seed AV list is empty. Please set seed manually first.")
             return False
 
         if self.current_task_params is None:
@@ -880,9 +1033,6 @@ class CornerTeachingTask:
         rospy.loginfo(f"Calling Vision Service... prompt={req.prompt}, strategy='{req.strategy}'")
         self.update_display("Vision\nThinking...")
         rospy.loginfo("Using Manually set Seed AV.")
-
-        self.robot_model.angle_vector(self.manual_seed_av)
-        base_rot = self.end_coords.worldrot()
 
         try:
             res = vision_srv(req)
@@ -950,57 +1100,79 @@ class CornerTeachingTask:
         gravity_compensation_vec = self.gravity_vector * -1.0 * self.const_params["gravity_comp_offset"]
         rospy.loginfo(f"[Vision] Applying Gravity Compensation Vector: {gravity_compensation_vec}")
 
-        for i, raw_coord in enumerate(base_coords_list):
-            pos = raw_coord.worldpos()
-            vec = pos - center_pos
-            vec_len = np.linalg.norm(vec)
-            if vec_len > 1e-6:
-                direction = vec / vec_len
-                pos = pos + direction * params["vision_area_margin"]
+        rospy.loginfo(f"Starting IK checks with {len(self.manual_seed_avs)} seeds...")
+        for seed_idx, current_seed in enumerate(reversed(self.manual_seed_avs)):
+            rospy.loginfo(f"--- Trying Seed #{len(self.manual_seed_avs) - seed_idx} ---")
+            self.robot_model.angle_vector(current_seed)
+            base_rot = self.end_coords.worldrot()
+            temp_corners = []
+            temp_avs = []
+            is_corner_ik_success = True
+            # 1. まず4隅のIKをチェック
+            for i, raw_coord in enumerate(base_coords_list):
+                pos = raw_coord.worldpos()
+                vec = pos - center_pos
+                pos = center_pos + vec * params["vision_area_margin"]
+                offset_vec = gravity_compensation_vec
+                pos += offset_vec
+                target = Coordinates(pos=pos, rot=base_rot)
 
-            offset_vec = gravity_compensation_vec
-            pos += offset_vec
-            target = Coordinates(pos=pos, rot=base_rot)
+                # このSeedでIKを解く
+                av = self._solve_ik(target, current_seed)
+                if av is None:
+                    rospy.logwarn(f"Seed #{len(self.manual_seed_avs) - seed_idx}: IK Failed for Corner {i + 1}")
+                    is_corner_ik_success = False
+                    break # このコーナー失敗 -> このSeedはダメ -> 次のSeedへ
 
-            # === 追加: 4隅のターゲット座標をログ出し ===
-            log_target_coords(f"Vision_Corner_{i+1}", target)
-            # ========================================
+                temp_corners.append(target)
+                temp_avs.append(av)
 
-            av = self._solve_ik(target, self.manual_seed_av)
-            if av is None:
-                rospy.logerr(f"IK Failed for Vision Corner {i + 1}")
-                self.update_display(f"IK Fail\nCorner{i + 1}")
-                return
+            if not is_corner_ik_success:
+                continue # 次のSeedを試す
 
-            temp_corners.append(target)
-            temp_avs.append(av)
+            # 2. 4隅OKなら、軌道生成と全体のIKチェックを行う
+            rospy.loginfo("Corners IK passed. Checking full trajectory...")
 
-        rospy.loginfo("All vision corners processed.")
-        self.update_display("Vision Done\nWait")
-        self.set_corners_and_plan(
-            temp_corners,
-            temp_avs,
-            trajectory_generator=params["trajectory_generator"]
-        )
+            # set_corners_and_plan に今のSeedを渡す
+            self.set_corners_and_plan(
+                temp_corners,
+                temp_avs,
+                trajectory_generator=params["trajectory_generator"],
+                manual_seed_av=current_seed
+            )
 
-        if self.av_seq:
-            return True
-        else:
-            return False
+            # 計画(av_seq)が生成されていれば成功
+            if self.av_seq:
+                rospy.loginfo(f"SUCCESS: Plan generated using Seed #{len(self.manual_seed_avs) - seed_idx}")
+                self.update_display("Vision Done\nWait")
+                return True
+            else:
+                rospy.logwarn(f"Seed #{len(self.manual_seed_avs) - seed_idx}: Trajectory IK Failed.")
+                # 次のSeedへ
+
+        # ループを抜けてきた場合＝全Seed全滅
+        rospy.logerr("ALL SEEDS FAILED.")
+        self.update_display("IK Fail\nAll Seeds")
+        return False
 
     # ==========================================================
     #  Planning & Execution
     # ==========================================================
-    def set_corners_and_plan(self, corners, avs, trajectory_generator):
-        self.corners = corners
-        self.corner_avs = avs
-
-        if len(self.corners) != 4:
+    def set_corners_and_plan(self, corners, corner_avs, trajectory_generator, manual_seed_av=None):
+        if len(corners) != 4:
             return
 
         if not self._check_gravity_initialized():
             self.av_seq = []
             return
+
+        # Seedの解決: 引数がなければ保存されている最新を使う
+        target_seed = manual_seed_av
+        if target_seed is None:
+            if self.manual_seed_avs:
+                target_seed = self.manual_seed_avs[-1]
+            else:
+                target_seed = None # Seedなし
 
         # radial用: 持ち上げ高さ
         lift_height = self.const_params["lift_height"]
@@ -1013,13 +1185,13 @@ class CornerTeachingTask:
         # --- 外部から注入された軌道生成関数を使用 ---
         rospy.loginfo(f"Generating trajectory using: {trajectory_generator.__name__}")
         waypoints, seed_avs = trajectory_generator(
-            self.corners,
-            self.corner_avs,
+            corners,
+            corner_avs,
             gravity_vector=self.gravity_vector, # 共通: 重力ベクトル
             lift_height=lift_height,            # Radial用: 持ち上げ高さ
             stir_depth=stir_depth,              # Spiral用: 沈める深さ
             press_stroke=press_stroke,          # Press用
-            manual_seed_av=self.manual_seed_av,
+            manual_seed_av=target_seed,
             base_offset=base_offset,
         )
 
@@ -1165,8 +1337,8 @@ class CornerTeachingTask:
                 rospy.loginfo(">>> Starting Service Requested Sequence <<<")
 
                 # シードが設定されていない場合はエラーで弾く
-                if self.manual_seed_av is None:
-                    rospy.logerr("Cannot start auto task: Seed AV is not set.")
+                if not self.manual_seed_avs:
+                    rospy.logerr("Cannot start auto task: Seed AV list is empty.")
                     self.update_display("Err:No Seed")
                     time.sleep(1.0)
                     continue
