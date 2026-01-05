@@ -145,9 +145,9 @@ class Florence2Segmenter:
             task_prompt: 実行したタスクのプロンプト (キーとして使用)
         """
         mask = np.zeros(image_shape[:2], dtype=np.uint8)
-        if not parsed_answer: 
+        if not parsed_answer:
             return mask
-        
+
         # 結果辞書から該当タスクのデータを取り出す
         results = parsed_answer.get(task_prompt, {})
 
@@ -277,7 +277,7 @@ class VisualPoseEstimator:
              empty_mask = np.zeros(color.shape[:2], dtype=np.uint8)
              self.publish_debug_image(
                  color, empty_mask, [], mode, header,
-                 prompt_text=target_prompt, 
+                 prompt_text=target_prompt,
                  status_msg="Not Found (VQA)"
              )
              return VisualPoseResponse(success=False, message=msg_str, poses=[])
@@ -289,14 +289,14 @@ class VisualPoseEstimator:
 
         if np.count_nonzero(mask) == 0:
              msg_str = f"Object '{target_prompt}' not found (Empty mask)."
-             
+
              # 空のマスクですが画像を表示し、メッセージを表示してPublish
              self.publish_debug_image(
                  color, mask, [], mode, header,
-                 prompt_text=target_prompt, 
+                 prompt_text=target_prompt,
                  status_msg="Not Found (Empty Mask)"
              )
-             
+
              return VisualPoseResponse(success=False, message=msg_str, poses=[])
 
         # 3. モード別処理
@@ -341,7 +341,7 @@ class VisualPoseEstimator:
         # 5. 可視化 (成功時: status_msgは空または"Found"など)
         self.publish_debug_image(
             color, mask, points_3d, mode, header,
-            approx_poly=self.last_approx_corners, 
+            approx_poly=self.last_approx_corners,
             prompt_text=target_prompt,
             status_msg="Found (VQA)"
         )
@@ -389,8 +389,7 @@ class VisualPoseEstimator:
 
     def calculate_corners(self, mask, depth_img):
         """
-        変更点: minAreaRect(長方形強制)をやめ、approxPolyDP(多角形近似)を使用して
-        パースのついた台形や一般四角形として頂点を取得する。
+        修正版: エッジノイズ対策（Inset & Median）を追加
         """
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         if not contours:
@@ -399,65 +398,89 @@ class VisualPoseEstimator:
         # 最大の領域を取得
         largest_contour = max(contours, key=cv2.contourArea)
 
-        # --- 変更ここから ---
+        # 重心(Centroid)を計算 (Inset方向決定のため)
+        M = cv2.moments(largest_contour)
+        if M["m00"] == 0:
+            cx, cy = 0, 0
+        else:
+            cx = int(M["m10"] / M["m00"])
+            cy = int(M["m01"] / M["m00"])
+        center_arr = np.array([cx, cy])
 
-        # 1. 形状をきれいにするために凸包(Convex Hull)を取得
-        # これにより、凹みノイズを除去し、綺麗な多角形にしやすくします
+        # --- 形状概略化 (元のコードのまま) ---
         hull = cv2.convexHull(largest_contour)
-
-        # 2. 多角形近似を行い、頂点が4つになるパラメータを探す
         box_points = None
-
-        # 許容誤差(epsilon)を少しずつ大きくしながら、ちょうど4点になる場所を探す
-        # 周長の1%から始めて、最大10%まで試行
         for factor in np.linspace(0.01, 0.1, 10):
             epsilon = factor * cv2.arcLength(hull, True)
             approx = cv2.approxPolyDP(hull, epsilon, True)
-
             if len(approx) == 4:
-                # (N, 1, 2) -> (N, 2) に形状変換
                 box_points = approx.reshape(-1, 2)
                 break
 
-        # もしうまく4点が見つからなかった場合(円形に近い、ノイズが多い等)のフォールバック
         if box_points is None:
-            # 仕方がないので従来のminAreaRectを使う（あるいはエラーにする）
             rect = cv2.minAreaRect(largest_contour)
             box_points = np.int0(cv2.boxPoints(rect))
 
-        # 頂点の順序を整列させる（オプション）
-        # 左上、右上、右下、左下 の順などに揃えたい場合はここでソート処理を入れると良いです
-        # 今回は検出順のまま進めます
+        # --- 3次元座標変換 (修正箇所) ---
 
-        # --- 変更ここまで ---
-
-        # 4. 3次元座標へ変換 (以降は元のコードと同じですが、box_pointsを使います)
+        # マスク全体の深度中央値 (フォールバック用)
         fallback_z = self.get_representative_depth(mask, depth_img)
         if fallback_z is None: fallback_z = 0.0
 
         points_3d = []
 
+        # パラメータ設定
+        inset_dist = 5.0  # 重心方向に何ピクセル内側を見るか
+        kernel_r = 2      # 参照半径 (2なら5x5領域の中央値を見る)
+
         for point in box_points:
             u, v = point
 
-            # 画像外にはみ出さないようクリップ
-            v_safe = int(np.clip(v, 0, depth_img.shape[0] - 1))
-            u_safe = int(np.clip(u, 0, depth_img.shape[1] - 1))
+            # 1. Inset処理: 重心方向へ座標をずらす
+            # ベクトル計算
+            vec = center_arr - point
+            norm = np.linalg.norm(vec)
 
-            d_val = depth_img[v_safe, u_safe]
+            if norm > 0:
+                # 重心方向へ inset_dist 分だけ移動
+                direction = vec / norm
+                new_pt = point + direction * inset_dist
+                u_in, v_in = int(new_pt[0]), int(new_pt[1])
+            else:
+                u_in, v_in = u, v
+
+            # 画像範囲外チェック
+            v_in = int(np.clip(v_in, 0, depth_img.shape[0] - 1))
+            u_in = int(np.clip(u_in, 0, depth_img.shape[1] - 1))
+
+            # 2. Area Sampling (Median): 周辺領域の中央値を取得
+            v_min = max(0, v_in - kernel_r)
+            v_max = min(depth_img.shape[0], v_in + kernel_r + 1)
+            u_min = max(0, u_in - kernel_r)
+            u_max = min(depth_img.shape[1], u_in + kernel_r + 1)
+
+            roi = depth_img[v_min:v_max, u_min:u_max]
+            valid_depths = roi[roi > 0] # 0(欠損)を除外
+
+            if len(valid_depths) > 0:
+                d_val = np.median(valid_depths)
+            else:
+                d_val = 0
+
             z = d_val * 0.001
 
-            if z <= 0.001 or (fallback_z > 0 and abs(z - fallback_z) > 0.5):
+            # 3. 外れ値除去 (閾値を0.5 -> 0.2に厳格化)
+            # 角の深度が、物体全体の平均深度と20cm以上ずれていたら、平均深度を採用する
+            if z <= 0.001 or (fallback_z > 0 and abs(z - fallback_z) > 0.2):
                 z = fallback_z
 
+            # 4. 投影 (X,Yは「元の角のピクセル(u,v)」を使い、Zは「内側で測った深度」を使う)
             if z > 0:
                 pt_3d = self.project_pixel_to_3d(u, v, z)
                 points_3d.append(pt_3d)
             else:
                 points_3d.append((0.0, 0.0, 0.0))
 
-        # 描画用に box_points を返す (approx_polyとして使用)
-        # box_points は numpy array なので、リスト構造などに直す必要はなくそのまま使えます
         return points_3d, box_points, "Success"
 
     # =========================================================================

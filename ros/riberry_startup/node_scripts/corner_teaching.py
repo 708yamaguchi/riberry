@@ -25,6 +25,15 @@ from std_msgs.msg import String
 import tf
 
 
+def log_target_coords(tag, coords):
+    pos = coords.worldpos()
+    # rpy_angle() は [yaw(z), pitch(y), roll(x)] を返す (単位: rad)
+    rpy = coords.rpy_angle()[0] 
+    rpy_deg = np.rad2deg(rpy)
+    rospy.loginfo(f"[{tag}] Pos=[{pos[0]:.3f}, {pos[1]:.3f}, {pos[2]:.3f}] "
+                  f"RPY_deg=[{rpy_deg[0]:.1f}, {rpy_deg[1]:.1f}, {rpy_deg[2]:.1f}]")
+
+
 # ==========================================================
 #  Trajectory Generators (動作パターン関数)
 # ==========================================================
@@ -66,6 +75,12 @@ def generate_zigzag_trajectory(corners, corner_avs, step_width=0.02, **kwargs):
         else:
             waypoints.extend([wp_r, wp_l])
             seed_avs.extend([av_right, av_left])
+
+    # 生成されたターゲット座標をログ出し
+    rospy.loginfo("--- [DEBUG] Zigzag Waypoints Check ---")
+    for i, wp in enumerate(waypoints):
+        log_target_coords(f"Zigzag_WP_{i:02d}", wp)
+    rospy.loginfo("--------------------------------------")
 
     return waypoints, seed_avs
 
@@ -447,8 +462,9 @@ class CornerTeachingTask:
         self.const_params = {
             "target_speed": 0.15,           # [m/s]
             "min_time_step": 0.3,           # [s]
-            "error_tolerance": 0.02,        # [m] IK許容誤差
-            "gravity_comp_offset": 0.20,    # [m] Vision認識時の重力補正高さ
+            "pos_error_tolerance": 0.02,        # [m] IK許容誤差
+            "rot_error_tolerance": np.deg2rad(5.0), # [rad] IK回転許容誤差 (rthre)
+            "gravity_comp_offset": 0.15,    # [m] Vision認識時の重力補正高さ
             "lift_height": 0.10,            # [m] 移動時の持ち上げ高さ
             "stir_depth": 0.06,             # [m] かき混ぜ時の深さ
             "press_stroke": 0.18,           # 押し込み深さ (基準高さより下)
@@ -675,29 +691,61 @@ class CornerTeachingTask:
         return co_base_to_cam
 
     def _solve_ik(self, target_coords, seed_av):
+        # 1. パラメータの取得
         rot_axis = True
-        if self.current_task_params and "rotation_axis" in self.current_task_params:
-            rot_axis = self.current_task_params["rotation_axis"]
+        rthre_val = self.const_params["rot_error_tolerance"]
+        pos_thre_val = self.const_params["pos_error_tolerance"]
+        
+        if self.current_task_params:
+            rot_axis = self.current_task_params.get("rotation_axis", True)
 
+        # 2. まずは厳格に解く (revert_if_fail=True)
+        # これが成功するのが一番きれいな姿勢です
         self.robot_model.angle_vector(seed_av)
+        
         result = self.robot_model.inverse_kinematics(
             target_coords=target_coords,
             move_target=self.end_coords,
             rotation_axis=rot_axis,
-            rthre=np.deg2rad(5),
-            # rthre=np.deg2rad(45),
+            rthre=rthre_val,
             stop=50,
-            revert_if_fail=False
+            revert_if_fail=True  # 失敗したら元の姿勢に戻る
         )
 
-        dist_err = np.linalg.norm(self.end_coords.worldpos() - target_coords.worldpos())
-        is_success = (result is not False) and (result is not None)
-
-        if is_success:
+        if result is not False and result is not None:
             return self.robot_model.angle_vector()
-        elif dist_err < self.const_params["error_tolerance"]:
+
+        # 3. 厳格モードで失敗した場合の救済措置 (Retry with False)
+        # ここで "無理やり" 解き、その結果が許容範囲内かチェックする
+        # rospy.logwarn("Strict IK failed, retrying with revert_if_fail=False...")
+
+        self.robot_model.angle_vector(seed_av) # シードに戻してから再トライ
+        self.robot_model.inverse_kinematics(
+            target_coords=target_coords,
+            move_target=self.end_coords,
+            rotation_axis=rot_axis,
+            rthre=rthre_val, # 回転誤差はここでもチェックされる
+            stop=50,
+            revert_if_fail=False # 失敗してもその姿勢を維持
+        )
+
+        # 4. 位置誤差と回転誤差のチェック
+        current_pos = self.end_coords.worldpos()
+        target_pos = target_coords.worldpos()
+        dist_err = np.linalg.norm(current_pos - target_pos)
+
+        # 回転誤差のチェック (rthreを緩めたい場合はここを調整)
+        diff_rot = self.end_coords.worldrot().T @ target_coords.worldrot()
+        # トレースから角度差を算出 (0~pi)
+        angle_err = np.arccos(np.clip((np.trace(diff_rot) - 1)/2, -1, 1))
+
+        # 判定: 位置誤差が許容内 かつ 回転誤差も許容内ならOKとする
+        if dist_err < pos_thre_val and angle_err < rthre_val:
+            rospy.logwarn(f"IK accepted with tolerance. PosErr: {dist_err*1000:.1f}mm, RotErr: {np.rad2deg(angle_err):.1f}deg")
             return self.robot_model.angle_vector()
         else:
+            # 救済も失敗
+            rospy.logerr(f"IK Failed. PosErr: {dist_err*1000:.1f}mm (Thre:{pos_thre_val*1000:.1f}), RotErr: {np.rad2deg(angle_err):.1f}deg (Thre:{np.rad2deg(rthre_val):.1f})")
             return None
 
     def _check_gravity_initialized(self):
@@ -913,6 +961,10 @@ class CornerTeachingTask:
             offset_vec = gravity_compensation_vec
             pos += offset_vec
             target = Coordinates(pos=pos, rot=base_rot)
+
+            # === 追加: 4隅のターゲット座標をログ出し ===
+            log_target_coords(f"Vision_Corner_{i+1}", target)
+            # ========================================
 
             av = self._solve_ik(target, self.manual_seed_av)
             if av is None:

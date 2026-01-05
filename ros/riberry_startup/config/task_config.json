@@ -27,7 +27,7 @@
     },
     "trace": {
       "trajectory_type": "zigzag",
-      "margin": -0.08,
+      "margin": 0,
       "rotation_axis": "x"
     }
   },
@@ -39,7 +39,7 @@
     "coffee powder": "segmentation",
     "white washbasin": "segmentation",
     "inside of cooking pot": "segmentation",
-    "sleeve of sweater": "segmentation",
+    "dark green sweater": "segmentation",
     "pile of screws": "detection",
     "screws": "detection"
   },
