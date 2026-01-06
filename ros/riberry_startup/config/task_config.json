@@ -40,7 +40,9 @@
     "white washbasin": "segmentation",
     "inside of cooking pot": "segmentation",
     "dark green sweater": "segmentation",
+    "white sweater": "segmentation",      
     "black scarf": "segmentation",
+    "checkered scarf": "segmentation",
     "pile of screws": "detection",
     "screws": "detection"
   },
