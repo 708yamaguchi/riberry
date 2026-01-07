@@ -36,7 +36,7 @@ class TaskParserNode:
         self.srv_client = rospy.ServiceProxy('/task_instruction', TaskInstruction)
         # 入力トピック: 音声認識結果
         self.sub_speech = rospy.Subscriber(
-            "module_llm/speech_to_text",  # 必要に応じてトピック名を変更してください
+            "speech_to_text",  # 必要に応じてトピック名を変更してください
             SpeechRecognitionCandidates,
             self._cb_speech
         )

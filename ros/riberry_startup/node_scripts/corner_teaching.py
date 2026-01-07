@@ -97,6 +97,7 @@ def generate_trace_trajectory(corners, corner_avs, step_width=0.02, gravity_vect
     # ロボット手先(EndEffector)座標系でのストローク方向を指定
     # "x+", "x-", "y+", "y-", "z+", "z-" が指定可能
     target_local_axis = "y+"
+    # target_local_axis = "y-"
     # ============================================================
 
     # 1. データの展開
@@ -175,6 +176,8 @@ def generate_trace_trajectory(corners, corner_avs, step_width=0.02, gravity_vect
         lift_vec = np.array([0, 0, 0.1])
     else:
         lift_vec = gravity_vector * -1.0 * lift_height
+
+    lift_vec = lift_height * np.array([0, 0, 1])
 
     # 進行方向(New0 -> New3)の長さを基準にステップ数を計算
     len_advance = np.linalg.norm(p[3] - p[0])
@@ -622,7 +625,7 @@ class CornerTeachingTask:
             "stir_depth": 0.06,             # [m] かき混ぜ時の深さ
             "press_stroke": 0.18,           # 押し込み深さ (基準高さより下)
 
-            "vision_base_offset": (0.0, 0.0, 0.0),  # [m] ベース座標系相対でのオフセット
+            "vision_base_offset": (0.0, -0.02, 0.0),  # [m] ベース座標系相対でのオフセット
 
             # "ee_offset": (-0.1, 0.0, 0.2),  # 刷毛把持用
             # "ee_offset": (-0.12, 0.0, 0.08),  # 糊用グリッパ
@@ -630,7 +633,8 @@ class CornerTeachingTask:
             # "ee_offset": (-0.03, 0.0, 0.08),  # 布巾を持つとき（カメラから離した場所が先端になる）
             # "ee_offset": (-0.12, 0.0, 0.25),  # 箸をもつとき
             # "ee_offset": (-0.11, 0.0, 0.14),  # 押し洗い用エンドエフェクタ
-            "ee_offset": (-0.12, 0.0, 0.15),    # 毛玉とるとる用エンドエフェクタ
+            # "ee_offset": (-0.12, 0.0, 0.15),    # 毛玉とるとる用エンドエフェクタ
+            "ee_offset": (-0.10, 0.0, 0.17),    # エチケットブラシ用エンドエフェクタ
         }
 
         self.func_map = {
