@@ -39,26 +39,26 @@ def calculate_oriented_surface_normal(corners, ref_pos):
     コーナー座標から面の法線を算出し、ref_pos(ロボット手先)側を向くように向きを揃える。
     """
     p = [c.worldpos() for c in corners]
-    
+
     # 1. 3点を使って仮の法線を計算 (P0 -> P1, P0 -> P3)
     vec_a = p[1] - p[0]
     vec_b = p[3] - p[0]
     normal = np.cross(vec_a, vec_b)
-    
+
     # 正規化
     norm_val = np.linalg.norm(normal)
     if norm_val < 1e-6:
         return np.array([0, 0, 1.0]) # 計算不能時はZ軸
     normal /= norm_val
-    
+
     # 2. 面の中心から手先へのベクトル
     center = np.mean(p, axis=0)
     vec_check = ref_pos - center
-    
+
     # 3. 内積で向き判定 (逆を向いていたら反転)
     if np.dot(normal, vec_check) < 0:
         normal = -normal
-        
+
     return normal
 
 
@@ -635,8 +635,7 @@ class CornerTeachingTask:
             "lift_height": 0.15,            # [m] 移動時の持ち上げ高さ
             "stir_depth": 0.06,             # [m] かき混ぜ時の深さ
             "press_stroke": 0.18,           # 押し込み深さ (基準高さより下)
-
-            "vision_base_offset": (0.0, -0.02, 0.0),  # [m] ベース座標系相対でのオフセット
+            "vision_base_offset": (0.0, 0.0, 0.0),  # [m] ベース座標系相対でのオフセット
 
             # "ee_offset": (-0.1, 0.0, 0.2),  # 刷毛把持用
             # "ee_offset": (-0.12, 0.0, 0.08),  # 糊用グリッパ
@@ -646,6 +645,9 @@ class CornerTeachingTask:
             # "ee_offset": (-0.11, 0.0, 0.14),  # 押し洗い用エンドエフェクタ
             # "ee_offset": (-0.12, 0.0, 0.15),    # 毛玉とるとる用エンドエフェクタ
             "ee_offset": (-0.10, 0.0, 0.17),    # エチケットブラシ用エンドエフェクタ
+
+            "min_coverage_ratio": 0.4,      # 実行を許可する最低カバー率 (40%)
+            "max_seed_count": 5,            # 保存するSeedの最大数
         }
 
         self.func_map = {
@@ -985,11 +987,16 @@ class CornerTeachingTask:
         self.update_display("Manual Done\nWait")
         rospy.loginfo("Manual Teaching finished. Keeping Servo OFF.")
 
-        self.set_corners_and_plan(
+        # 戻り値を受け取るように変更（coverageなどはマニュアルではログ表示程度でOK）
+        coverage, self.av_seq, self.times = self.set_corners_and_plan(
             temp_corners,
             temp_avs,
-            trajectory_generator=generate_zigzag_trajectory
+            trajectory_generator=trajectory_func,
+            manual_seed_av=temp_avs[-1]
         )
+
+        if not self.av_seq:
+            self.update_display("Plan Fail")
 
     # ==========================================================
     #  Vision Teaching
@@ -997,13 +1004,20 @@ class CornerTeachingTask:
     def set_vision_seed(self):
         rospy.loginfo("Setting IK Seed for Vision...")
         self.manual_seed_avs.append(self.ri.angle_vector())
+        max_seeds = self.const_params["max_seed_count"]
+        is_popped = False
+        # 上限チェックと削除
+        if len(self.manual_seed_avs) > max_seeds:
+            self.manual_seed_avs.pop(0) # 古いものを削除
+            is_popped = True
         count = len(self.manual_seed_avs)
-        rospy.loginfo(f"Manual seed_av captured. Total seeds: {count}")
-        if count == 1:
-            self.update_display("Seed Saved!\n(1st)")
+        rospy.loginfo(f"Manual seed_av captured. Total seeds: {count}/{max_seeds}")
+        count_str = f"({count}/{max_seeds})"
+        if is_popped:
+            self.update_display(f"Old Popped\n{count_str}")
         else:
-            self.update_display(f"Seed Add!\nTotal {count}")
-        time.sleep(1.0)
+            self.update_display(f"Seed Saved\n{count_str}")
+        time.sleep(1.5)
 
     def teach_corners_vision(self, long_side_stroke=True):
         """
@@ -1103,111 +1117,121 @@ class CornerTeachingTask:
 
             base_coords_list = sorted_coords
 
-        positions = np.array([c.worldpos() for c in base_coords_list])
-        center_pos = np.mean(positions, axis=0)
-
-        temp_corners = []
-        temp_avs = []
-
         if not self._check_gravity_initialized():
             return
-
         gravity_compensation_vec = self.gravity_vector * -1.0 * self.const_params["gravity_comp_offset"]
         rospy.loginfo(f"[Vision] Applying Gravity Compensation Vector: {gravity_compensation_vec}")
 
-        rospy.loginfo(f"Starting IK checks with {len(self.manual_seed_avs)} seeds...")
+        raw_corner_positions = np.array([c.worldpos() for c in base_coords_list])
+        center_pos = np.mean(raw_corner_positions, axis=0)
+        best_plan = {
+            "coverage": -1.0,
+            "av_seq": [],
+            "times": [],
+            "seed_idx": -1
+        }
+        min_coverage = self.const_params["min_coverage_ratio"]
+        rospy.loginfo(f"Starting Best Effort IK (Threshold: {min_coverage*100:.0f}%)...")
+        rospy.loginfo(f"IK checks with {len(self.manual_seed_avs)} seeds...")
+
         for seed_idx, current_seed in enumerate(reversed(self.manual_seed_avs)):
-            rospy.loginfo(f"--- Trying Seed #{len(self.manual_seed_avs) - seed_idx} ---")
-            self.robot_model.angle_vector(current_seed)
-            base_rot = self.end_coords.worldrot()
-            temp_corners = []
-            temp_avs = []
-            is_corner_ik_success = True
+            real_idx = len(self.manual_seed_avs) - seed_idx
+            rospy.loginfo(f"--- Trying Seed #{real_idx} ---")
+
+            temp_corners_coords = []
+            temp_corner_avs = []
+            self.robot_model.angle_vector(current_seed) # モデルをSeed姿勢へ
+            seed_rot = self.end_coords.worldrot()
+
             # 1. まず4隅のIKをチェック
             for i, raw_coord in enumerate(base_coords_list):
+                # 簡易的な位置補正
                 pos = raw_coord.worldpos()
                 vec = pos - center_pos
                 pos = center_pos + vec * params["vision_area_margin"]
-                offset_vec = gravity_compensation_vec
-                pos += offset_vec
-                target = Coordinates(pos=pos, rot=base_rot)
+                pos += gravity_compensation_vec
 
-                # このSeedでIKを解く
+                target = Coordinates(pos=pos, rot=seed_rot)
+
+                # コーナーIKトライ
                 av = self._solve_ik(target, current_seed)
-                if av is None:
-                    rospy.logwarn(f"Seed #{len(self.manual_seed_avs) - seed_idx}: IK Failed for Corner {i + 1}")
-                    is_corner_ik_success = False
-                    break # このコーナー失敗 -> このSeedはダメ -> 次のSeedへ
+                if av is not None:
+                    # 成功: そのコーナー専用のSeedとして採用
+                    temp_corner_avs.append(av)
+                else:
+                    # 失敗: 汎用のManual Seedで代用 (ここを諦めない！)
+                    rospy.logwarn(f"Corner {i} IK failed via Seed #{real_idx}. Using manual seed fallback.")
+                    temp_corner_avs.append(current_seed)
+                temp_corners_coords.append(target)
 
-                temp_corners.append(target)
-                temp_avs.append(av)
-
-            if not is_corner_ik_success:
-                continue # 次のSeedを試す
-
-            # 2. 4隅OKなら、軌道生成と全体のIKチェックを行う
-            rospy.loginfo("Corners IK passed. Checking full trajectory...")
-
-            # set_corners_and_plan に今のSeedを渡す
-            self.set_corners_and_plan(
-                temp_corners,
-                temp_avs,
+            # 2. 全体の軌道生成とカバレッジ計算
+            coverage, av_seq, times = self.set_corners_and_plan(
+                temp_corners_coords,
+                temp_corner_avs, # 混合リスト(専用AV or ManualSeed)を渡す
                 trajectory_generator=params["trajectory_generator"],
                 manual_seed_av=current_seed
             )
+            rospy.loginfo(f"Seed #{real_idx} Result: Coverage {coverage*100:.1f}%")
 
-            # 計画(av_seq)が生成されていれば成功
-            if self.av_seq:
-                rospy.loginfo(f"SUCCESS: Plan generated using Seed #{len(self.manual_seed_avs) - seed_idx}")
-                self.update_display("Vision Done\nWait")
-                return True
-            else:
-                rospy.logwarn(f"Seed #{len(self.manual_seed_avs) - seed_idx}: Trajectory IK Failed.")
-                # 次のSeedへ
+            # ベスト更新判定
+            if coverage > best_plan["coverage"]:
+                best_plan["coverage"] = coverage
+                best_plan["av_seq"] = av_seq
+                best_plan["times"] = times
+                best_plan["seed_idx"] = real_idx
 
-        # ループを抜けてきた場合＝全Seed全滅
-        rospy.logerr("ALL SEEDS FAILED.")
-        self.update_display("IK Fail\nAll Seeds")
-        return False
+                if coverage >= 0.99:
+                    rospy.loginfo("Found perfect seed. Stopping search.")
+                    break
+
+        # 結果判定
+        final_cov = best_plan["coverage"]
+        if final_cov >= min_coverage:
+            self.av_seq = best_plan["av_seq"]
+            self.times = best_plan["times"]
+
+            rospy.loginfo(f"SUCCESS: Adopted Seed #{best_plan['seed_idx']} with {final_cov*100:.1f}% coverage.")
+            self.update_display(f"Ready\nCov {final_cov*100:.0f}%")
+            return True
+        else:
+            rospy.logerr(f"ALL SEEDS FAILED or Low Coverage. Best: {final_cov*100:.1f}% (Req: {min_coverage*100:.0f}%)")
+            self.update_display(f"IK Fail\nBest {final_cov*100:.0f}%")
+            return False
 
     # ==========================================================
     #  Planning & Execution
     # ==========================================================
-    def set_corners_and_plan(self, corners, corner_avs, trajectory_generator, manual_seed_av=None):
+    def set_corners_and_plan(self, corners, corner_avs, trajectory_generator, manual_seed_av):
+        """
+        戻り値として (coverage, av_seq, times) を返すように変更。
+        self.av_seq へのセットは呼び出し元で行う。
+        """
         if len(corners) != 4:
-            return
+            return 0.0, [], []
 
         if not self._check_gravity_initialized():
-            self.av_seq = []
-            return
+            return 0.0, [], []
 
-        # Seedの解決: 引数がなければ保存されている最新を使う
-        target_seed = manual_seed_av
-        if target_seed is None:
-            if self.manual_seed_avs:
-                target_seed = self.manual_seed_avs[-1]
-            else:
-                target_seed = None # Seedなし
-
-        # radial用: 持ち上げ高さ
-        lift_height = self.const_params["lift_height"]
-        # spiral用: 鍋底への沈み込み深さ
-        stir_depth = self.const_params["stir_depth"]
-        press_stroke = self.const_params["press_stroke"]
-        base_offset = self.const_params["vision_base_offset"]
-
-        # すべてのコーナー座標をここでずらしてしまうことで、
-        # 以降の法線計算や軌道生成はすべて「ずらした後の座標」で行われます。
+        # --- Vision Base Offset の一括適用 ---
         base_offset = np.array(self.const_params["vision_base_offset"])
         if np.linalg.norm(base_offset) > 1e-6:
-            rospy.loginfo(f"Applying Vision Base Offset globally: {base_offset}")
-            for c in corners:
+            # 内部計算用にコピーして適用（元のcornersを破壊しないよう注意しても良いが、今回はフロー上OK）
+            import copy
+            corners_calc = [copy.deepcopy(c) for c in corners]
+            for c in corners_calc:
                 c.translate(base_offset, wrt='world')
+        else:
+            corners_calc = corners
 
         # 現在のロボット手先位置を取得 (Vision認識時などの位置)
         current_ee_pos = self.end_coords.worldpos()
         lift_vector = calculate_oriented_surface_normal(corners, current_ee_pos)
         rospy.loginfo(f"Calculated Lift Vector: {lift_vector}")
+
+        # パラメータ取得
+        lift_height = self.const_params["lift_height"]
+        stir_depth = self.const_params["stir_depth"]
+        press_stroke = self.const_params["press_stroke"]
 
         # --- 外部から注入された軌道生成関数を使用 ---
         rospy.loginfo(f"Generating trajectory using: {trajectory_generator.__name__}")
@@ -1218,53 +1242,70 @@ class CornerTeachingTask:
             lift_height=lift_height,            # Radial用: 持ち上げ高さ
             stir_depth=stir_depth,              # Spiral用: 沈める深さ
             press_stroke=press_stroke,          # Press用
-            manual_seed_av=target_seed,
+            manual_seed_av=manual_seed_av,
         )
 
-        seq = self.solve_full_ik(waypoints, seed_avs)
+        # --- IK (Best Effort) ---
+        av_seq, valid_wps, coverage = self.solve_full_ik(waypoints, seed_avs)
+        # 軌道が極端に短い（2点未満）場合は失敗扱い
+        if len(av_seq) < 2:
+            rospy.logwarn("Valid waypoints less than 2. Plan failed.")
+            return 0.0, [], []
 
-        if seq is None:
-            rospy.logerr("Planning failed.")
-            self.update_display("IK Fail\n1:Retry")
-            self.av_seq = []
-            return
-
-        self.av_seq = seq
-        self.times = []
-        # 最初の点は、開始姿勢(av_seq[0])へ移動済みとして、短い時間または0を入れる
-        self.times.append(1.0)
+        # --- [重要] 時間の再計算 ---
+        # スキップされた点があっても、残った点同士の距離で時間を計算することで
+        # target_speed を維持し、過剰な高速動作を防ぐ。
+        times = []
+        times.append(1.0)  # 初期移動時間
         target_speed = self.const_params["target_speed"]
         min_time_step = self.const_params["min_time_step"]
         # 2点目以降の時間を計算
-        for i in range(1, len(waypoints)):
-            # 前回の座標と今回の座標の距離を計算
-            pos_prev = np.array(waypoints[i - 1].worldpos())
-            pos_curr = np.array(waypoints[i].worldpos())
+        for i in range(1, len(valid_wps)):
+            pos_prev = np.array(valid_wps[i - 1].worldpos())
+            pos_curr = np.array(valid_wps[i].worldpos())
             dist = np.linalg.norm(pos_curr - pos_prev)
-            # 時間 = 距離 / 速度
-            # ただしゼロ割防止と、回転のみの動作考慮で最小時間を設ける
+
+            # 距離 / 速度 で時間を算出
             dt = max(min_time_step, dist / target_speed)
-            self.times.append(dt)
+            times.append(dt)
 
         # 合計時間をログ表示
-        total_time = sum(self.times)
-        rospy.loginfo(f"Plan ready. Total waypoints: {len(self.av_seq)}, Est. Duration: {total_time:.1f}s, Speed: {target_speed}m/s")
+        total_time = sum(times)
+        rospy.loginfo(f"Plan ready. Total waypoints: {len(av_seq)}, Est. Duration: {total_time:.1f}s, Speed: {target_speed}m/s")
+        return coverage, av_seq, times
 
     def solve_full_ik(self, waypoints, seed_avs):
-        rospy.loginfo("Solving IK for full trajectory...")
+        """
+        IKを解き、解けた点のみを含むリストを返す (Best Effort)。
+        戻り値: (filtered_av_seq, filtered_waypoints, coverage_ratio)
+        """
+        rospy.loginfo(f"Solving IK for {len(waypoints)} points (Best Effort)...")
         self.update_display("Plan\nWait")
 
-        av_sequence = []
+        filtered_av_seq = []
+        filtered_waypoints = []
+
+        success_count = 0
+        total_count = len(waypoints)
+
         for i, (wp, seed) in enumerate(zip(waypoints, seed_avs)):
             av = self._solve_ik(wp, seed)
-            if av is None:
-                dist = np.linalg.norm(self.end_coords.worldpos() - wp.worldpos())
-                rospy.logwarn(f"Point {i}: IK Failed. Error: {dist * 1000:.1f}mm")
-                return None
-            av_sequence.append(av)
+            if av is not None:
+                filtered_av_seq.append(av)
+                filtered_waypoints.append(wp)
+                success_count += 1
+            else:
+                # 失敗した点はスキップ (ログには出すが処理は継続)
+                # rospy.logdebug(f"Point {i}: IK Failed. Skipping.")
+                pass
 
-        rospy.loginfo("IK Solved successfully.")
-        return av_sequence
+        coverage = 0.0
+        if total_count > 0:
+            coverage = float(success_count) / total_count
+
+        rospy.loginfo(f"IK Result: Coverage {coverage*100:.1f}% ({success_count}/{total_count})")
+
+        return filtered_av_seq, filtered_waypoints, coverage
 
     def execute_motion(self):
         if not self.av_seq:
@@ -1320,6 +1361,9 @@ class CornerTeachingTask:
             self.ri.wait_interpolation()
 
             # 2. 軌道実行
+            total_exec_time = sum(self.times)
+            num_points = len(self.av_seq)
+            rospy.loginfo(f"Executing motion: {num_points} points in {total_exec_time:.2f} sec")
             self.ri.angle_vector_sequence(self.av_seq, times=self.times)
 
             # 3. 実行中のキャンセル監視

@@ -27,7 +27,7 @@
     },
     "trace": {
       "trajectory_type": "trace",
-      "margin": 0.94,
+      "margin": 1.0,
       "rotation_axis": "x"
     },
     "brush": {
