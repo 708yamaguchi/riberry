@@ -34,6 +34,34 @@ def log_target_coords(tag, coords):
                   f"RPY_deg=[{rpy_deg[0]:.1f}, {rpy_deg[1]:.1f}, {rpy_deg[2]:.1f}]")
 
 
+def calculate_oriented_surface_normal(corners, ref_pos):
+    """
+    コーナー座標から面の法線を算出し、ref_pos(ロボット手先)側を向くように向きを揃える。
+    """
+    p = [c.worldpos() for c in corners]
+    
+    # 1. 3点を使って仮の法線を計算 (P0 -> P1, P0 -> P3)
+    vec_a = p[1] - p[0]
+    vec_b = p[3] - p[0]
+    normal = np.cross(vec_a, vec_b)
+    
+    # 正規化
+    norm_val = np.linalg.norm(normal)
+    if norm_val < 1e-6:
+        return np.array([0, 0, 1.0]) # 計算不能時はZ軸
+    normal /= norm_val
+    
+    # 2. 面の中心から手先へのベクトル
+    center = np.mean(p, axis=0)
+    vec_check = ref_pos - center
+    
+    # 3. 内積で向き判定 (逆を向いていたら反転)
+    if np.dot(normal, vec_check) < 0:
+        normal = -normal
+        
+    return normal
+
+
 # ==========================================================
 #  Trajectory Generators (動作パターン関数)
 # ==========================================================
@@ -85,7 +113,7 @@ def generate_zigzag_trajectory(corners, corner_avs, step_width=0.02, **kwargs):
     return waypoints, seed_avs
 
 
-def generate_trace_trajectory(corners, corner_avs, step_width=0.02, gravity_vector=None, lift_height=0.1, **kwargs):
+def generate_trace_trajectory(corners, corner_avs, step_width=0.02, lift_vector=None, lift_height=0.1, **kwargs):
     """
     一方向になでる動作（Trace）。
     指定されたローカル軸（例: "y+"）が、長辺/短辺のどちらに近いかを判定し、
@@ -169,15 +197,8 @@ def generate_trace_trajectory(corners, corner_avs, step_width=0.02, gravity_vect
     r = [raw_r[i] for i in idx_map]
     av = [raw_av[i] for i in idx_map]
 
-    # --- 以下、既存のロジック (p, r, avを使用) ---
-
     # --- 持ち上げベクトルの決定 ---
-    if gravity_vector is None:
-        lift_vec = np.array([0, 0, 0.1])
-    else:
-        lift_vec = gravity_vector * -1.0 * lift_height
-
-    lift_vec = lift_height * np.array([0, 0, 1])
+    lift_vec = lift_vector * lift_height
 
     # 進行方向(New0 -> New3)の長さを基準にステップ数を計算
     len_advance = np.linalg.norm(p[3] - p[0])
@@ -241,7 +262,7 @@ def generate_trace_trajectory(corners, corner_avs, step_width=0.02, gravity_vect
     return waypoints, seed_avs
 
 
-def generate_radial_gathering_trajectory(corners, corner_avs, step_width=0.03, gravity_vector=None, lift_height=0.1, **kwargs):
+def generate_radial_gathering_trajectory(corners, corner_avs, step_width=0.03, lift_vector=None, lift_height=0.1, **kwargs):
     """
     領域の外周（辺）から中心に向かって掃き寄せるような放射状の軌道を生成する。
     戻る動作の際にアームを持ち上げて、次の開始点へ移動する。
@@ -258,7 +279,7 @@ def generate_radial_gathering_trajectory(corners, corner_avs, step_width=0.03, g
 
     # --- 持ち上げベクトルの決定 ---
     # 重力と逆方向(上)へ lift_height 分
-    lift_vec = gravity_vector * -1.0 * lift_height
+    lift_vec = lift_vector * lift_height
 
     # 1. 領域の中心点を計算
     center_pos = np.mean(p, axis=0)
@@ -338,7 +359,7 @@ def generate_radial_gathering_trajectory(corners, corner_avs, step_width=0.03, g
     return waypoints, seed_avs
 
 
-def generate_spiral_stirring_trajectory(corners, corner_avs, step_width=0.02, gravity_vector=None, stir_depth=0.0, manual_seed_av=None, **kwargs):
+def generate_spiral_stirring_trajectory(corners, corner_avs, step_width=0.02, lift_vector=None, stir_depth=0.0, manual_seed_av=None, **kwargs):
     """
     4隅で定義される平面上で、外側から中心へ向かい、また外側へ戻る螺旋軌道を生成する。
 
@@ -390,10 +411,11 @@ def generate_spiral_stirring_trajectory(corners, corner_avs, step_width=0.02, gr
     rospy.loginfo("\n" + "="*30)
     rospy.loginfo(f"[Spiral] Detected Center: {center_pos}")
 
-    if gravity_vector is not None and abs(stir_depth) > 1e-6:
-        depth_offset = gravity_vector * stir_depth
+    depth_vec = -1.0 * lift_vector # 法線の逆
+    if abs(stir_depth) > 1e-6:
+        depth_offset = depth_vec * stir_depth
         center_pos += depth_offset
-        rospy.loginfo(f"[Spiral] Applying Depth Offset: {depth_offset} (Depth={stir_depth}m)")
+        rospy.loginfo(f"[Spiral] Applying Depth Offset along vector {depth_vec} (Depth={stir_depth}m)")
 
     rospy.loginfo(f"[Spiral] Max Radius: {max_radius:.4f} m (Margin: {radius_margin})")
     # 歪みチェック用ログ
@@ -476,32 +498,21 @@ def generate_spiral_stirring_trajectory(corners, corner_avs, step_width=0.02, gr
     return waypoints, seed_avs
 
 
-def generate_grid_pressing_trajectory(corners, corner_avs, step_width=0.05, gravity_vector=None, press_stroke=0.03, manual_seed_av=None, press_steps=5, gravity_comp_offset=0.0, base_offset=(0, 0, 0), **kwargs):
+def generate_grid_pressing_trajectory(corners, corner_avs, step_width=0.05, lift_vector=None, press_stroke=0.03, manual_seed_av=None, press_steps=5, **kwargs):
     """
     領域内をグリッド状に移動し、各点に対して垂直方向の押し込み（プレス）動作を行う。
 
     Args:
-        base_offset (tuple): ロボットベース座標系基準のオフセット (x, y, z) [m]
-                             認識位置全体をこの量だけ平行移動させる。
         press_steps (int): 押し込み動作の分割数（動作をゆっくりにするため）
     """
-    # --- 1. ベース座標系オフセットの適用 ---
-    # 入力されたコーナー座標全体を、ロボット基準でずらす
-    offset_vec = np.array(base_offset)
-    p = [c.worldpos() + offset_vec for c in corners]
+    p = [c.worldpos() for c in corners]
     r = [c.worldrot() for c in corners]
     av = corner_avs
-
     rospy.loginfo(f"[Press] Applying Base Offset: {base_offset}")
 
     # --- 2. ベクトル計算 ---
-    if gravity_vector is None:
-        g_vec = np.array([0, 0, -1.0])
-    else:
-        g_vec = np.array(gravity_vector)
-
-    vec_up = -1.0 * g_vec
-    vec_down = g_vec
+    vec_up = lift_vector
+    vec_down = -1.0 * lift_vector
 
     # 進行方向(0->3)の長さを基準に「行数」を計算
     len_long = np.linalg.norm(p[3] - p[0])
@@ -552,7 +563,7 @@ def generate_grid_pressing_trajectory(corners, corner_avs, step_width=0.05, grav
 
             # --- 高さの補正 ---
             # 1. 基準位置 (Top)
-            pos_top = p_safe_plane + (vec_down * gravity_comp_offset)
+            pos_top = p_safe_plane
             # 2. 押し込み位置 (Bottom)
             pos_bottom = pos_top + (vec_down * press_stroke)
 
@@ -1183,20 +1194,31 @@ class CornerTeachingTask:
         # spiral用: 鍋底への沈み込み深さ
         stir_depth = self.const_params["stir_depth"]
         press_stroke = self.const_params["press_stroke"]
-
         base_offset = self.const_params["vision_base_offset"]
+
+        # すべてのコーナー座標をここでずらしてしまうことで、
+        # 以降の法線計算や軌道生成はすべて「ずらした後の座標」で行われます。
+        base_offset = np.array(self.const_params["vision_base_offset"])
+        if np.linalg.norm(base_offset) > 1e-6:
+            rospy.loginfo(f"Applying Vision Base Offset globally: {base_offset}")
+            for c in corners:
+                c.translate(base_offset, wrt='world')
+
+        # 現在のロボット手先位置を取得 (Vision認識時などの位置)
+        current_ee_pos = self.end_coords.worldpos()
+        lift_vector = calculate_oriented_surface_normal(corners, current_ee_pos)
+        rospy.loginfo(f"Calculated Lift Vector: {lift_vector}")
 
         # --- 外部から注入された軌道生成関数を使用 ---
         rospy.loginfo(f"Generating trajectory using: {trajectory_generator.__name__}")
         waypoints, seed_avs = trajectory_generator(
             corners,
             corner_avs,
-            gravity_vector=self.gravity_vector, # 共通: 重力ベクトル
+            lift_vector=lift_vector,
             lift_height=lift_height,            # Radial用: 持ち上げ高さ
             stir_depth=stir_depth,              # Spiral用: 沈める深さ
             press_stroke=press_stroke,          # Press用
             manual_seed_av=target_seed,
-            base_offset=base_offset,
         )
 
         seq = self.solve_full_ik(waypoints, seed_avs)

@@ -47,6 +47,7 @@
     "dark green sweater": "segmentation",
     "white sweater": "segmentation",
     "black scarf": "segmentation",
+    "black pants": "segmentation",
     "checkered scarf": "segmentation",
     "dust bunny": "segmentation",
     "screws": "detection"
