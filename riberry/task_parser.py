@@ -13,7 +13,7 @@ class TaskParser:
         self.config = config
         self.chat_model = chat_model
         self.embed_model = embed_model
-        
+
         # 1. 候補リストの展開
         self.valid_actions = list(self.config.get("action_registry", {}).keys())
         # _default は除外し、純粋なターゲットのみリスト化
@@ -21,12 +21,12 @@ class TaskParser:
         self.valid_units = self.config.get("valid_units", ["times", "minutes"])
 
         print("[TaskParser] Initializing: Pre-calculating embeddings...")
-        
+
         # 2. Embedding事前計算
         self.action_vectors = self._precompute_vectors(self.valid_actions)
         self.object_vectors = self._precompute_vectors(self.valid_objects)
         self.unit_vectors   = self._precompute_vectors(self.valid_units)
-        
+
         # 3. ウォームアップ (Prompt Cachingのため)
         print("[TaskParser] Warming up Chat Model...")
         self._warm_up()
@@ -48,28 +48,32 @@ class TaskParser:
 
     def _build_system_prompt(self):
         return f"""
-        あなたはロボットへの命令を解析するアシスタントです。
-        ユーザーの入力文から情報を抽出し、必ず以下の制約に従ってJSON形式で出力してください。
+        あなたはロボットへの命令を構造化データに変換する厳格なパーサーです。
+        ユーザーの入力文を解析し、以下の定義済みリストに基づいてJSONを出力してください。
 
-        【制約事項: 候補リストからの選択】
-        抽出する値は、必ず以下のリストの中から最も意味が近いものを選んでください。
-        リストにない言葉は使わないでください。
-        
-        - Target (対象): {self.valid_objects}
-        - Action (動作): {self.valid_actions}
-        - Repeat.Unit (単位): {self.valid_units} (回数ならtimes, 時間ならminutes)
+        ### 定義済みリスト (これ以外は使用禁止)
+        - Valid Targets (対象): {self.valid_objects}
+        - Valid Actions (動作): {self.valid_actions}
+        - Valid Units   (単位): {self.valid_units}
 
-        【出力フォーマット】
+        ### 重要ルール
+        1. **有効な命令:** 入力がリスト内の動作や対象に関連する場合、最も近いものを選択してJSONを生成してください。
+           (例: "机を拭いて" -> {{"Action": "clean", "Target": "table" ...}})
+
+        2. **無効/無関係な入力:** 以下のような場合は、**必ず空のJSONオブジェクト `{{}}` を返してください。**
+           - 挨拶 ("こんにちは", "元気？")
+           - 天気の話 ("今日は晴れだね")
+           - 定義リストに全く関連しない命令 ("歌って", "ダンスして" など、Valid Actionsに含まれないもの)
+
+        ### 出力フォーマット (JSONのみ)
         {{
-            "Target": "...", 
-            "Action": "...",
+            "Target": "文字列 (Valid Targetsから選択)",
+            "Action": "文字列 (Valid Actionsから選択)",
             "Repeat": {{
-                "Value": 数値 (数値がない場合は 1),
-                "Unit": "..."
+                "Value": 数値 (省略時は 1),
+                "Unit": "文字列 (Valid Unitsから選択)"
             }}
         }}
-        
-        入力文の意味を解釈し、"洗って" -> "clean" のように適切な変換を行ってください。
         """
 
     def _warm_up(self):
@@ -101,16 +105,16 @@ class TaskParser:
         for candidate, cand_vec in candidate_cache.items():
             norm_q = np.linalg.norm(query_vec)
             norm_c = np.linalg.norm(cand_vec)
-            
+
             if norm_q == 0 or norm_c == 0:
                 score = 0.0
             else:
                 score = np.dot(query_vec, cand_vec) / (norm_q * norm_c)
-            
+
             if score > best_score:
                 best_score = score
                 best_candidate = candidate
-        
+
         return best_candidate
 
     def parse(self, text):
@@ -129,6 +133,10 @@ class TaskParser:
             llm_result = json.loads(content)
         except Exception as e:
             print(f"LLM Error: {e}")
+            return None
+
+        # LLMが空の辞書 {} を返してきた場合は、タスクなしとみなして終了
+        if not llm_result:
             return None
 
         # --- Stage 2: Embedding Matching (Double Check) ---
@@ -158,6 +166,10 @@ class TaskParser:
         else:
             final_result["Repeat"] = { "Value": 1, "Unit": "times" }
 
+        # 最終チェック: ActionもTargetも特定できなかった場合は無効とする(オプション)
+        if final_result["Target"] is None and final_result["Action"] is None:
+            return None
+
         return final_result
 
 
@@ -181,16 +193,20 @@ if __name__ == "__main__":
     }
 
     print("--- Starting Standalone Test ---")
-    # 設定辞書を直接渡す
     parser = TaskParser(config=dummy_config)
 
     test_sentences = [
-        "ネジを全部集めて。",
-        "コーヒーの粉を3回掃除してください。",
-        "5分間、塗ってください。"
+        "ネジを全部集めて。",                   # 正常系
+        "コーヒーの粉を3回掃除してください。",   # 正常系
+        "こんにちは！いい天気ですね。",          # 無関係 (期待値: None / empty)
+        "今日の株価を教えて。",                 # 無関係 (期待値: None / empty)
+        "踊って！"                             # 無関係 (期待値: None / empty, 動作リストにない)
     ]
 
     for text in test_sentences:
         print(f"\nInput: {text}")
         result = parser.parse(text)
-        print(json.dumps(result, indent=2, ensure_ascii=False))
+        if result:
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+        else:
+            print("Result: None (Ignored)")
