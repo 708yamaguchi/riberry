@@ -15,6 +15,11 @@
       "margin": 0.95,
       "rotation_axis": true
     },
+    "ironing": {
+      "trajectory_type": "zigzag",
+      "margin": 1.0,
+      "rotation_axis": "x"
+    },
     "stir": {
       "trajectory_type": "spiral",
       "margin": 0.98,
@@ -48,6 +53,7 @@
     "white sweater": "segmentation",
     "black scarf": "segmentation",
     "black pants": "segmentation",
+    "checkered handkerchief": "segmentation",
     "checkered scarf": "segmentation",
     "dust bunny": "segmentation",
     "screws": "detection"
