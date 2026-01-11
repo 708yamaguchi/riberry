@@ -40,6 +40,11 @@
       "margin": 1.0,
       "rotation_axis": "x"
     },
+    "lint roller": {
+      "trajectory_type": "trace",
+      "margin": 0.95,
+      "rotation_axis": "y"
+    },
     "brush": {
       "trajectory_type": "trace",
       "margin": 3.0,
@@ -64,6 +69,7 @@
     "checkered scarf": "segmentation",
     "white cloth": "segmentation",
     "dust bunny": "segmentation",
+    "doormat": "segmentation",
     "screws": "detection"
   },
   "valid_units": ["times", "minutes"]
