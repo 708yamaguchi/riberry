@@ -15,6 +15,11 @@
       "margin": 0.95,
       "rotation_axis": true
     },
+    "apply glue": {
+      "trajectory_type": "zigzag",
+      "margin": 0.8,
+      "rotation_axis": "x"
+    },
     "ironing": {
       "trajectory_type": "zigzag",
       "margin": 0.95,
@@ -44,6 +49,8 @@
   "object_registry": {
     "green area": "segmentation",
     "golden plate": "segmentation",
+    "metalic plate": "segmentation",
+    "black plate": "segmentation",
     "wood tray": "segmentation",
     "coffee stain": "segmentation",
     "coffee powder": "segmentation",
