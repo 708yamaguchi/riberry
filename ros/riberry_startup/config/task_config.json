@@ -45,6 +45,11 @@
       "margin": 0.85,
       "rotation_axis": "y"
     },
+    "blow dry": {
+      "trajectory_type": "spiral",
+      "margin": 1.0,
+      "rotation_axis": "x"
+    },
     "brush": {
       "trajectory_type": "trace",
       "margin": 3.0,
