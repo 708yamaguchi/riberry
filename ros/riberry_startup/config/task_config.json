@@ -42,7 +42,7 @@
     },
     "lint roller": {
       "trajectory_type": "trace",
-      "margin": 0.95,
+      "margin": 0.85,
       "rotation_axis": "y"
     },
     "brush": {
@@ -70,6 +70,9 @@
     "white cloth": "segmentation",
     "dust bunny": "segmentation",
     "doormat": "segmentation",
+    "pillow": "segmentation",
+    "blue splatter": "segmentation",
+    "hair": "segmentation",
     "screws": "detection"
   },
   "valid_units": ["times", "minutes"]
