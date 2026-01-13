@@ -2,8 +2,8 @@
   "action_registry": {
     "wipe": {
       "trajectory_type": "zigzag",
-      "margin": 1.05,
-      "rotation_axis": true
+      "margin": 5,
+      "rotation_axis": "x"
     },
     "collect": {
       "trajectory_type": "radial",
