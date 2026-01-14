@@ -2,7 +2,7 @@
   "action_registry": {
     "wipe": {
       "trajectory_type": "zigzag",
-      "margin": 0.8,
+      "margin": 2.5,
       "rotation_axis": "y"
     },
     "collect": {
@@ -78,7 +78,8 @@
     "pillow": "segmentation",
     "blue splatter": "segmentation",
     "hair": "segmentation",
-    "bottom groove": "segmentation",      
+    "bottom groove": "segmentation",
+    "sink drain": "segmentation",
     "screws": "detection"
   },
   "valid_units": ["times", "minutes"]
