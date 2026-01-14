@@ -32,8 +32,8 @@
     },
     "press": {
       "trajectory_type": "press",
-      "margin": 0.93,
-          "rotation_axis": true
+      "margin": 0.75,
+      "rotation_axis": "x"
     },
     "trace": {
       "trajectory_type": "trace",

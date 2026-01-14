@@ -353,7 +353,7 @@ class VisualPoseEstimator:
     # =========================================================================
     def get_representative_depth(self, mask, depth_img):
         """
-        マスク領域全体の深度中央値を取得（フォールバック用）
+        マスク領域全体の深度代表値を取得（フォールバック用）
         """
         masked_depth = depth_img[mask > 0]
         valid_depth = masked_depth[masked_depth > 0]
@@ -423,15 +423,17 @@ class VisualPoseEstimator:
 
         # --- 3次元座標変換 (修正箇所) ---
 
-        # マスク全体の深度中央値 (フォールバック用)
+        # マスク全体の深度代表値 (フォールバック用)
         fallback_z = self.get_representative_depth(mask, depth_img)
         if fallback_z is None: fallback_z = 0.0
 
         points_3d = []
 
         # パラメータ設定
-        inset_dist = 5.0  # 重心方向に何ピクセル内側を見るか
-        kernel_r = 2      # 参照半径 (2なら5x5領域の中央値を見る)
+        # inset_dist = 5.0  # 重心方向に何ピクセル内側を見るか
+        # kernel_r = 2      # 参照半径 (2なら5x5領域を見る)
+        inset_dist = 1.0
+        kernel_r = 5
 
         for point in box_points:
             u, v = point
@@ -453,7 +455,7 @@ class VisualPoseEstimator:
             v_in = int(np.clip(v_in, 0, depth_img.shape[0] - 1))
             u_in = int(np.clip(u_in, 0, depth_img.shape[1] - 1))
 
-            # 2. Area Sampling (Median): 周辺領域の中央値を取得
+            # 2. Area Sampling: 周辺領域の代表値を取得
             v_min = max(0, v_in - kernel_r)
             v_max = min(depth_img.shape[0], v_in + kernel_r + 1)
             u_min = max(0, u_in - kernel_r)
@@ -463,7 +465,9 @@ class VisualPoseEstimator:
             valid_depths = roi[roi > 0] # 0(欠損)を除外
 
             if len(valid_depths) > 0:
-                d_val = np.median(valid_depths)
+                # 小さい順（手前順）にソートして、ノイズを除いた「最も手前」に近い値を取る
+                # 5パーセンタイル（下位5%の位置にある値）を採用
+                d_val = np.percentile(valid_depths, 5)
             else:
                 d_val = 0
 
