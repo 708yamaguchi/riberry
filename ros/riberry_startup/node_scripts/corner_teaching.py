@@ -633,12 +633,12 @@ class CornerTeachingTask:
             "min_time_step": 0.3,           # [s]
             "pos_error_tolerance": 0.02,        # [m] IK許容誤差
             "rot_error_tolerance": np.deg2rad(5.0), # [rad] IK回転許容誤差 (rthre)
-            "gravity_comp_offset": 0.05,   # [m] Vision認識時の重力補正高さ
+            "gravity_comp_offset": 0.03,   # [m] Vision認識時の重力補正高さ
             "lift_height": 0.1,            # [m] 移動時の持ち上げ高さ
             "stir_depth": 0.06,             # [m] かき混ぜ時の深さ
             "press_stroke": 0.18,           # 押し込み深さ (基準高さより下)
-            # "vision_base_offset": (0.12, 0.0, -0.10),  # [m] ベース座標系相対でのオフセット
-            "vision_base_offset": (0.0, 0.0, 0.0),  # [m] ベース座標系相対でのオフセット
+            "vision_base_offset": (-0.08, 0.0, -0.2),  # [m] ベース座標系相対でのオフセット
+            # "vision_base_offset": (0.0, 0.0, 0.0),  # [m] ベース座標系相対でのオフセット
 
             # "ee_offset": (-0.1, 0.0, 0.2),  # 刷毛把持用
             # "ee_offset": (-0.12, 0.0, 0.08),  # 糊用グリッパ
