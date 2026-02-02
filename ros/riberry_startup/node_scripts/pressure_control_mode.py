@@ -97,8 +97,8 @@ class PressureControlMode(Mode):
             release_duration = 0  # start air work
         # Set pressures
         if state.trigger_pressure == 0 and state.target_pressure == 0:
-            trigger_pressure = -10
-            target_pressure = -30
+            trigger_pressure = -30
+            target_pressure = -35
         else:
             trigger_pressure = state.trigger_pressure
             target_pressure = state.target_pressure

@@ -11,32 +11,32 @@
       <!-- The order of the mode_names is the order of the AtomS3 screen -->
       mode_names:
       - DisplayInformationMode <!-- Enabled by display_information.service -->
-      - DisplayQRcodeMode <!-- Enabled by display_information.service -->
-      - DisplayImageMode <!-- Enabled by display_information.service -->
-      - PairingMode <!-- Enabled by display_information.service -->
-      - DisplayBatteryGraphMode
-      - ServoControlMode
+      <!-- - DisplayQRcodeMode <!-\- Enabled by display_information.service -\-> -->
+      <!-- - DisplayImageMode <!-\- Enabled by display_information.service -\-> -->
+      <!-- - PairingMode <!-\- Enabled by display_information.service -\-> -->
+      <!-- - DisplayBatteryGraphMode -->
+      <!-- - ServoControlMode -->
       - PressureControlMode
       - TeachingMode
-      - SystemDebugMode
+      <!-- - SystemDebugMode -->
       - FirmwareUpdateMode <!-- Enabled by display_information.service -->
       - WiFiSettingsMode <!-- Enabled by display_information.service -->
-      - DataCollectionMode
-      - LeaderFollowerMode
+      <!-- - DataCollectionMode -->
+      <!-- - LeaderFollowerMode -->
     </rosparam>
   </node>
 
-  <node name="display_battery_graph_mode"
-        pkg="riberry_startup" type="display_battery_graph_mode.py"
-        output="screen"
-        respawn="true">
-  </node>
+  <!-- <node name="display_battery_graph_mode" -->
+  <!--       pkg="riberry_startup" type="display_battery_graph_mode.py" -->
+  <!--       output="screen" -->
+  <!--       respawn="true"> -->
+  <!-- </node> -->
 
-  <node name="servo_control_mode"
-        pkg="riberry_startup" type="servo_control_mode.py"
-        output="screen"
-        respawn="true">
-  </node>
+  <!-- <node name="servo_control_mode" -->
+  <!--       pkg="riberry_startup" type="servo_control_mode.py" -->
+  <!--       output="screen" -->
+  <!--       respawn="true"> -->
+  <!-- </node> -->
 
   <node name="pressure_control_mode"
         pkg="riberry_startup" type="pressure_control_mode.py"
@@ -48,38 +48,53 @@
         pkg="riberry_startup" type="teaching_mode.py"
         output="screen"
         respawn="true" clear_params="true">
-  </node>
-
-  <node name="data_collection_mode"
-        pkg="riberry_startup" type="data_collection_mode.py"
-        output="screen"
-        respawn="true" clear_params="true">
-    <rosparam param="topic_names">
-      - /joint_states
-      - /tf
-      - /tf_static
-      - /camera/color/camera_info
-      - /camera/color/image_raw/compressed
-      - /camera/depth/camera_info
-      - /camera/depth/image_rect_raw/compressedDepth
-      - /camera/extrinsics/depth_to_color
+    <rosparam>
+      speed: 2
+      <!-- special_actions: -->
+      special_actions:
+      - name: "grasp"
+        start_command: "ri.servo_on(['gripper_dummy_joint']); ri.angle_vector(); ri.robot.gripper_dummy_joint.joint_angle(1.2); ri.angle_vector(ri.robot.angle_vector(), 2); rospy.sleep(2.5);"
+        stop_command: "ri.servo_on(['gripper_dummy_joint']); ri.angle_vector(); ri.robot.gripper_dummy_joint.joint_angle(-1.2); ri.angle_vector(ri.robot.angle_vector(), 2); rospy.sleep(2.5);"
+      - name: "vacuum"
+        start_command: "ri.send_pressure_control(board_idx=39, trigger_pressure=-10, target_pressure=-30, release_duration=0)"
+        stop_command: "ri.send_pressure_control(board_idx=39, trigger_pressure=-10, target_pressure=-30, release_duration=2)"
+      - name: "test"
+        start_command: "rospy.logwarn('start command test')"
+        stop_command: "rospy.logwarn('stop command test')"
+      end_coords_name: link7
     </rosparam>
   </node>
 
-  <node name="leader_follower_mode"
-        pkg="riberry_startup" type="leader_follower_mode.py"
-        output="screen"
-        respawn="true" clear_params="true">
-    <rosparam param="topic_names">
-      - /follower/joint_states
-      - /tf
-      - /tf_static
-      - /follower/camera/color/camera_info
-      - /follower/camera/color/image_raw/compressed
-      - /follower/camera/depth/camera_info
-      - /follower/camera/depth/image_rect_raw/compressedDepth
-      - /follower/camera/extrinsics/depth_to_color
-    </rosparam>
-  </node>
+  <!-- <node name="data_collection_mode" -->
+  <!--       pkg="riberry_startup" type="data_collection_mode.py" -->
+  <!--       output="screen" -->
+  <!--       respawn="true" clear_params="true"> -->
+  <!--   <rosparam param="topic_names"> -->
+  <!--     - /joint_states -->
+  <!--     - /tf -->
+  <!--     - /tf_static -->
+  <!--     - /camera/color/camera_info -->
+  <!--     - /camera/color/image_raw/compressed -->
+  <!--     - /camera/depth/camera_info -->
+  <!--     - /camera/depth/image_rect_raw/compressedDepth -->
+  <!--     - /camera/extrinsics/depth_to_color -->
+  <!--   </rosparam> -->
+  <!-- </node> -->
+
+  <!-- <node name="leader_follower_mode" -->
+  <!--       pkg="riberry_startup" type="leader_follower_mode.py" -->
+  <!--       output="screen" -->
+  <!--       respawn="true" clear_params="true"> -->
+  <!--   <rosparam param="topic_names"> -->
+  <!--     - /follower/joint_states -->
+  <!--     - /tf -->
+  <!--     - /tf_static -->
+  <!--     - /follower/camera/color/camera_info -->
+  <!--     - /follower/camera/color/image_raw/compressed -->
+  <!--     - /follower/camera/depth/camera_info -->
+  <!--     - /follower/camera/depth/image_rect_raw/compressedDepth -->
+  <!--     - /follower/camera/extrinsics/depth_to_color -->
+  <!--   </rosparam> -->
+  <!-- </node> -->
 
 </launch>

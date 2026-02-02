@@ -1,7 +1,8 @@
 [Unit]
 Description=Run roscore
-After=NetworkManager.service
+After=NetworkManager.service tailscaled.service
 Requires=NetworkManager.service
+Wants=tailscaled.service
 
 [Service]
 EnvironmentFile=-/etc/opt/riberry/riberry.user

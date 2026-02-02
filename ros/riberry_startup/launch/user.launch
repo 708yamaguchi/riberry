@@ -1,8 +1,51 @@
 <launch>
 
   <arg name="namespace" default="robot_a" />
+  <!-- If not connected to camera, low CPU usage -->
+  <arg name="camera" default="true" />
 
   <group ns="$(arg namespace)" >
+  </group>
+
+  <!-- For AtomS3 -->
+  <include file="$(find riberry_startup)/launch/all_modes.launch" />
+
+  <!-- Control servos -->
+  <include file="$(find kxr_controller)/launch/kxr_controller.launch">
+    <!-- <arg name="urdf_path" value="$(find yamaguchi_arm_nejineji)/urdf/yamaguchi_6axis_arm_nejineji.urdf" /> -->
+    <arg name="urdf_path" value="$(find yamaguchi_arm_nejineji)/urdf/yamaguchi_7axis_arm_nejineji.urdf" />
+    <!-- <arg name="urdf_path" value="$(find yamaguchi_arm_nejineji)/urdf/yamaguchi_3axis_arm_nejineji.urdf" /> -->
+    <arg name="servo_config_path" value="$(find yamaguchi_arm_nejineji)/config/servo_config.yaml" />
+    <arg name="imu_config_path" value="$(find riberry_startup)/config/imu_calibration.yaml" />
+    <arg name="publish_imu" value="true" />
+    <arg name="publish_sensor" value="false" />
+    <arg name="control_pressure" value="true" />
+    <arg name="control_loop_rate" value="30" />
+    <arg name="read_current" default="false" />
+    <arg name="read_temperature" default="true" />
+    <arg name="temperature_limit" default="60" />
+  </include>
+
+  <!-- Speech to action -->
+  <!-- <include file="$(find riberry_startup)/launch/speech_to_action.launch"> -->
+  <!--   <arg name="contexts_json" value="$(find riberry_startup)/sample/contexts.json" /> -->
+  <!--   <!-\- pervasive_sorcerer is the name of my Module LLM -\-> -->
+  <!--   <arg name="speech_to_text_topic_name" value="/pervasive_sorcerer/speech_to_text" /> -->
+  <!-- </include> -->
+
+  <!-- Camera -->
+  <group if="$(arg camera)">
+    <include file="$(find riberry_startup)/launch/d405.launch">
+      <arg name="high_resolution" value="true" />
+      <arg name="enable_depth" value="true" />
+      <arg name="color_fps" value="5" />
+      <arg name="depth_fps" value="5" />
+    </include>
+    <!-- <include file="$(find riberry_startup)/launch/apriltag_detection.launch" /> -->
+
+    <!-- yamaguchi_6axis_arm_nejineji to D405 -->
+    <node pkg="tf2_ros" type="static_transform_publisher" name="module5_camera_link_to_camera_link"
+      args="0 0 0 0 0 0 $(optenv ROS_NAMESPACE)/module5_camera_link $(optenv ROS_NAMESPACE)/camera_link" />
   </group>
 
 </launch>
