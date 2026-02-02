@@ -45,6 +45,10 @@ def get_ip_from_interface(interface_name):
 
 
 def get_ros_ip():
+    tailscale_ip = get_ip_from_interface("tailscale0")
+    if tailscale_ip:
+        return tailscale_ip
+
     try:
         route_get = subprocess.check_output(
             ["ip", "-o", "route", "get", "8.8.8.8"], stderr=subprocess.DEVNULL
@@ -91,6 +95,10 @@ def get_mac_address(interface=None):
 
 
 def get_ip_address():
+    tailscale_ip = get_ip_from_interface("tailscale0")
+    if tailscale_ip:
+        return tailscale_ip
+
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         s.connect(("8.8.8.8", 80))
