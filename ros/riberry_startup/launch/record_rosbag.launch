@@ -25,6 +25,7 @@
               /$(arg arm_name)/fullbody_controller/state
               /$(arg arm_name)/camera/color/image_raw/compressed
               /$(arg arm_name)/camera/depth/image_rect_raw/compressedDepth
+              /$(arg arm_name)/visual_pose_estimator/debug_image
               
               /larm_controller/state
               /rarm_controller/state

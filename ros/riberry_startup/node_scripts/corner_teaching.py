@@ -15,6 +15,7 @@ from riberry_startup.srv import VisualPose
 from riberry_startup.srv import VisualPoseRequest
 import rospy
 from sensor_msgs.msg import Imu
+from std_msgs.msg import Float64MultiArray
 from skrobot.coordinates import Coordinates
 from skrobot.coordinates import make_cascoords
 from skrobot.coordinates.math import interpolate_rotation_matrices
@@ -702,6 +703,10 @@ class CornerTeachingTask:
         )
         rospy.loginfo("Service /task_instruction is ready.")
 
+        # --- Seed設定用Topicの購読 ---
+        # 外部から直接 angle_vector を送り込むためのトピック
+        rospy.Subscriber(self.ns + "set_manual_seed_av", Float64MultiArray, self._cb_set_seed_av)
+
         # --- 保存データ ---
         self.av_seq = []
         self.times = []
@@ -1021,9 +1026,25 @@ class CornerTeachingTask:
     # ==========================================================
     #  Vision Teaching
     # ==========================================================
-    def set_vision_seed(self):
+    def _cb_set_seed_av(self, msg):
+        """Topicから送られてきた数値をそのまま内部メソッドに渡す"""
+        self.set_vision_seed(av=msg.data)
+
+    def set_vision_seed(self, av=None):
         rospy.loginfo("Setting IK Seed for Vision...")
-        self.manual_seed_avs.append(self.ri.angle_vector())
+
+        if av is None:
+            # ボタン押下時：現在の姿勢を取得
+            target_av = self.ri.angle_vector()
+        else:
+            # Topic経由時：数値の長さをチェック
+            target_av = np.array(av)
+            expected_len = len(self.ri.angle_vector())
+            if len(target_av) != expected_len:
+                rospy.logerr(f"Seed AV length mismatch! Expected {expected_len}, got {len(target_av)}")
+                return
+        
+        self.manual_seed_avs.append(target_av)
         max_seeds = self.const_params["max_seed_count"]
         is_popped = False
         # 上限チェックと削除

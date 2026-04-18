@@ -191,7 +191,7 @@ class VisualPoseEstimator:
 
         self.sync = ApproximateTimeSynchronizer(
             [self.color_sub, self.depth_sub],
-            queue_size=10,
+            queue_size=30,
             slop=0.2
         )
         self.sync.registerCallback(self.image_cb)
