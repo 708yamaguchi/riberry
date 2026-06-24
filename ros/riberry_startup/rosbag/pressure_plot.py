@@ -9,7 +9,7 @@ import sys
 # python pressure_plot.py rosbag_2026-04-18-21-04-13.bag --threshold -10 --start 55.7 --duration 19.83
 # python pressure_plot.py rosbag_2026-04-18-21-04-13.bag --threshold -35 --start 100 --duration 20
 # python pressure_plot.py rosbag_2026-04-18-21-04-13.bag --threshold -10 --start 210 --duration 15
-# python pressure_plot.py rosbag_2026-04-18-21-04-13.bag --threshold -35 --start 250 --duration 30
+# python pressure_plot.py rosbag_2026-04-18-21-04-13.bag --threshold -35 --start 255 --duration 19.83
 
 def main():
     # --- 1. コマンドライン引数の設定 (すべてpositional) ---
@@ -20,6 +20,7 @@ def main():
     parser.add_argument('--duration', default=20, type=float, help='切り出す長さ（秒間）')
     parser.add_argument('--fps', type=int, default=15, help='出力動画のFPS (default: 15)')
     parser.add_argument('--save_img', action='store_true', help='終了時の静止画を保存し表示する')
+    parser.add_argument('--save_svg', action='store_true', help='終了時の静止画をSVGとして保存する')
     args = parser.parse_args()
 
     topic = '/yamaguchi_arm_2/fullbody_controller/pressure/39'
@@ -62,6 +63,36 @@ def main():
     if not times:
         print("指定された範囲にデータが存在しませんでした。引数を確認してください。")
         return
+
+    # ロスバッグの記録時にタイムスタンプが一時的に固まって（バーストして）記録されたデータを、
+    # 各ブロック間で均等に分散させて本来のサンプリング間隔に補正する
+    clusters = []
+    current_cluster = []
+    for i, t in enumerate(times):
+        if not current_cluster:
+            current_cluster.append(i)
+        else:
+            prev_t = times[current_cluster[-1]]
+            if t - prev_t > 0.01:
+                clusters.append(current_cluster)
+                current_cluster = [i]
+            else:
+                current_cluster.append(i)
+    if current_cluster:
+        clusters.append(current_cluster)
+
+    spaced_times = np.zeros(len(times))
+    for c_idx, cluster in enumerate(clusters):
+        n_points = len(cluster)
+        t_start = times[cluster[0]]
+        if c_idx < len(clusters) - 1:
+            t_next = times[clusters[c_idx + 1][0]]
+        else:
+            t_next = args.duration
+        
+        for step_i, idx in enumerate(cluster):
+            spaced_times[idx] = t_start + step_i * (t_next - t_start) / n_points
+    times = spaced_times.tolist()
 
     # --- 3. プロットの設定 ---
     fig, ax = plt.subplots(figsize=(7, 5), dpi=100)
@@ -171,7 +202,7 @@ def main():
     ani = animation.FuncAnimation(fig, update, frames=total_frames, init_func=init, blit=True)
 
     # --- 5. 保存 ---
-    if args.save_img:
+    if args.save_img or args.save_svg:
         # 1. 画像比率を4:3に変更 (例: 横8インチ, 縦6インチ)
         fig.set_size_inches(8, 6)
         
@@ -187,7 +218,10 @@ def main():
         update(total_frames - 1)
         
         # 画像として保存 (ファイル名は bagファイル名などから生成)
-        image_output = args.bagfile.replace('.bag', '_final.pdf')
+        if args.save_svg:
+            image_output = args.bagfile.replace('.bag', '_final.svg')
+        else:
+            image_output = args.bagfile.replace('.bag', '_final.pdf')
         plt.savefig(image_output)
         print(f"Successfully saved final frame to {image_output}")
 
